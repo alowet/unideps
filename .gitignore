@@ -1,0 +1,9 @@
+data/*
+wandb/*
+*.pyc
+*.pkl
+*.pt
+*.json
+*.jsonl
+*.csv
+*.txt
