@@ -67,15 +67,20 @@ def compute_loss(probe: DependencyProbe,
         return preds_masked, labels_masked
 
 
-def train_probe(model: UDTransformer,
-                train_loader: DataLoader,
-                dev_loader: DataLoader,
-                layer: int = -1,
-                learning_rate: float = 1e-3,
-                num_epochs: int = 10,
-                train_toks: str = "tail",
-                run_name: Optional[str] = None) -> DependencyProbe:
-    """Train dependency probe with integrated evaluation."""
+def train_probe(
+    model: UDTransformer,
+    train_loader: DataLoader,
+    dev_loader: DataLoader,
+    device: torch.device,
+    layer: int = -1,
+    learning_rate: float = 1e-3,
+    num_epochs: int = 10,
+    train_toks: str = "tail",
+    run_name: Optional[str] = None
+) -> DependencyProbe:
+    """Train dependency probe."""
+
+    print(f"Training probe on device: {device}")
 
     # Initialize wandb
     wandb.init(
@@ -90,9 +95,6 @@ def train_probe(model: UDTransformer,
             "hidden_dim": model.model.cfg.d_model,
         }
     )
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "mps")
-    print(f"Using device: {device}")
 
     # Initialize models and optimizer
     hidden_dim = model.model.cfg.d_model

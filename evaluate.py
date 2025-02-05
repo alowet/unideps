@@ -19,9 +19,9 @@ def evaluate_probe(
     model: UDTransformer,
     probe: DependencyProbe,
     test_loader: DataLoader,
+    device: torch.device,
     layer: int,
     train_toks: str = "tail",
-    device: Optional[torch.device] = None,
 ) -> Dict[str, float]:
     """Evaluate probe on test set.
 
@@ -38,8 +38,8 @@ def evaluate_probe(
             - balanced_accuracy: Accuracy balanced across classes
             - per_class_accuracy: Accuracy for each dependency type
     """
-    if device is None:
-        device = torch.device("cuda" if torch.cuda.is_available() else "mps")
+
+    print(f"Evaluating on device: {device}")
 
     probe.to(device)
     probe.eval()
@@ -224,8 +224,19 @@ def compute_majority_baseline(test_loader: DataLoader) -> Dict[str, float]:
     return baseline_metrics
 
 
-def main(test_loader: DataLoader, probes: Dict[int, DependencyProbe], model: UDTransformer, train_toks: str = "tail"):
+def main(
+    test_loader: DataLoader,
+    probes: Dict[int, DependencyProbe],
+    model: UDTransformer,
+    train_toks: str = "tail",
+    device: Optional[torch.device] = None
+):
     """Main evaluation function."""
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "mps")
+
+    print(f"\nEvaluating on device: {device}")
+
     # First compute baseline
     print("\nComputing majority class baseline...")
     baseline = compute_majority_baseline(test_loader)
@@ -244,7 +255,7 @@ def main(test_loader: DataLoader, probes: Dict[int, DependencyProbe], model: UDT
     results = {}
     for layer, probe in probes.items():
         print(f"\nEvaluating layer {layer}")
-        metrics = evaluate_probe(model, probe, test_loader, layer, train_toks)
+        metrics = evaluate_probe(model, probe, test_loader, layer, train_toks, device)
         results[layer] = metrics
         print(f"Balanced accuracy: {metrics['balanced_accuracy']:.3f}")
         print(f"Improvement over majority baseline:")
@@ -252,9 +263,9 @@ def main(test_loader: DataLoader, probes: Dict[int, DependencyProbe], model: UDT
         print(f"  Weighted F1: {metrics['weighted_f1'] - baseline['weighted_f1']:.3f}")
 
     # Plot results
-    plot_layer_results(results, baseline, save_path=f"figures/{train_toks}_results_layers_{min(probes.keys())}-{max(probes.keys())}.png")
+    plot_layer_results(results, baseline, save_path=f"figures/evals/eval_{train_toks}_results_layers_{min(probes.keys())}-{max(probes.keys())}.png")
 
     # Save results with baseline
     results["baseline"] = baseline
-    with open(f"data/{train_toks}_results_layers_{min(probes.keys())}-{max(probes.keys())}.pkl", "wb") as f:
+    with open(f"data/evals/eval_{train_toks}_results_layers_{min(probes.keys())}-{max(probes.keys())}.pkl", "wb") as f:
         pickle.dump(results, f)

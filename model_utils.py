@@ -3,26 +3,27 @@ from typing import Dict, List, Optional, Tuple
 import torch
 from huggingface_hub import login
 from load_data import UDSentence
+from tqdm import tqdm
 
 # from transformers import AutoModelForCausalLM, AutoTokenizer
-from sae_lens import HookedSAETransformer
-from tqdm import tqdm
+from transformer_lens import HookedTransformer
 
 
 class UDTransformer:
-    def __init__(self, model_name: str = "gemma-2-2b"):
+    def __init__(self, model_name: str, device: torch.device):
         """Initialize the UDTransformer.
 
         Args:
             model_name: Name of the model to use from HuggingFace
+            device: Device to load the model on
         """
-
+        # Read HuggingFace token
         with open('/n/home06/alowet/.cache/huggingface/token', 'r') as f:
             token = f.read()
         login(token)
-        device = torch.device("cuda" if torch.cuda.is_available() else "mps")
 
-        self.model = HookedSAETransformer.from_pretrained(model_name, device=device)
+        print(f"Loading {model_name} on device: {device}")
+        self.model = HookedTransformer.from_pretrained(model_name, device=device)
 
     def get_token_masks(self, sentences: List[UDSentence], do_print: bool = False, train_toks: str = "tail"):
         """Get token masks for sentences.
