@@ -1,8 +1,7 @@
 """Linear probes for dependency parsing"""
 
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
-import numpy as np
 import torch
 import torch.nn as nn
 import wandb
@@ -28,9 +27,10 @@ def compute_loss(probe: DependencyProbe,
                 model: UDTransformer,
                 batch: Dict,
                 layer: int,
-                criterion: nn.Module,
                 device: torch.device,
-                train_toks: str = "tail") -> Tuple[torch.Tensor, torch.Tensor]:
+                train_toks: str = "tail",
+                criterion: nn.modules.loss._Loss = nn.BCEWithLogitsLoss,
+                return_type: str = "loss") -> Tuple[torch.Tensor, torch.Tensor]:
     """Compute loss for a single batch.
 
     Args:
@@ -40,7 +40,8 @@ def compute_loss(probe: DependencyProbe,
         layer: Layer to probe
         criterion: Loss function
         device: Device to use
-
+        train_toks: Whether to use head or tail of dependency
+        return_type: Whether to return loss (training/dev) or predictions (testing)
     Returns:
         loss: The computed loss
         scores: The probe's predictions
@@ -52,13 +53,18 @@ def compute_loss(probe: DependencyProbe,
     # Get labels and mask
     labels = batch["labels"].to(device)
     dep_mask = batch["dep_mask"].to(device)
+    labels_masked = labels[dep_mask]
 
-    # Compute masked loss
-    scores_masked = scores[dep_mask].reshape(-1, scores.size(-1))
-    labels_masked = labels[dep_mask].reshape(-1, labels.size(-1))
-    loss = criterion(scores_masked, labels_masked)
+    if return_type == "loss":
+        # Compute masked loss
+        scores_masked = scores[dep_mask]
+        loss = criterion(scores_masked, labels_masked)
+        return loss, scores
 
-    return loss, scores
+    else:  # return_type == "preds":
+        preds = torch.sigmoid(scores) > 0.5  # sigmoid since we're using BCE loss
+        preds_masked = preds[dep_mask]
+        return preds_masked, labels_masked
 
 
 def train_probe(model: UDTransformer,
@@ -113,7 +119,7 @@ def train_probe(model: UDTransformer,
             optimizer.zero_grad()
 
             # Compute loss and update
-            loss, _ = compute_loss(probe, model, batch, layer, criterion, device, train_toks=train_toks)
+            loss, _ = compute_loss(probe, model, batch, layer, device, train_toks=train_toks, criterion=criterion, return_type="loss")
             loss.backward()
             optimizer.step()
 
@@ -138,7 +144,7 @@ def train_probe(model: UDTransformer,
 
         with torch.no_grad():
             for batch in tqdm(dev_loader, desc='Evaluating'):
-                loss, _ = compute_loss(probe, model, batch, layer, criterion, device, train_toks=train_toks)
+                loss, _ = compute_loss(probe, model, batch, layer, device, train_toks=train_toks, criterion=criterion, return_type="loss")
                 total_loss += loss.item()
                 num_batches += 1
 
@@ -162,11 +168,12 @@ def train_probe(model: UDTransformer,
 
         # Early stopping check
         if epoch - best_epoch > 3:  # 3 epochs patience
-            print(f"No improvement for 3 epochs, stopping early")
+            print("No improvement for 3 epochs, stopping early")
             break
 
     # Restore best model
-    probe.load_state_dict(best_state)
+    if best_state is not None:
+        probe.load_state_dict(best_state)
     wandb.finish()
 
     return probe

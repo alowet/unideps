@@ -1,7 +1,7 @@
 """Evaluation and visualization for dependency probes."""
 
 import pickle
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -9,7 +9,7 @@ import seaborn as sns
 import torch
 from model_utils import UDTransformer
 from probing import DependencyProbe, compute_loss
-from sklearn.metrics import balanced_accuracy_score, confusion_matrix, f1_score
+from sklearn.metrics import balanced_accuracy_score, f1_score
 from task import DependencyTask
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -54,19 +54,7 @@ def evaluate_probe(
     with torch.no_grad():
         for batch in tqdm(test_loader, desc="Evaluating"):
             # Get model outputs
-            activations = model.get_activations(batch, layer_idx=layer, train_toks=train_toks)
-            scores = probe(activations)
-
-            # Get labels and mask
-            labels = batch["labels"].to(device)
-            dep_mask = batch["dep_mask"].to(device)
-
-            # Get predictions (sigmoid since we're using BCE loss)
-            preds = torch.sigmoid(scores) > 0.5
-
-            # Only evaluate on unmasked tokens
-            preds_masked = preds[dep_mask]
-            labels_masked = labels[dep_mask]
+            preds_masked, labels_masked = compute_loss(probe, model, batch, layer, device, train_toks, return_type="preds")
 
             all_preds.append(preds_masked.cpu())
             all_labels.append(labels_masked.cpu())
@@ -108,11 +96,12 @@ def evaluate_probe(
     return metrics
 
 
-def plot_layer_results(results: Dict[int, Dict[str, float]], save_path: Optional[str] = None):
+def plot_layer_results(results: Dict[int, Dict[str, float]], baseline: Dict[str, float], save_path: Optional[str] = None):
     """Plot evaluation results across layers.
 
     Args:
         results: Dictionary mapping layer indices to metric dictionaries
+        baseline: Dictionary containing baseline metrics
         save_path: Optional path to save plot
     """
     # Set up plot style
@@ -133,6 +122,11 @@ def plot_layer_results(results: Dict[int, Dict[str, float]], save_path: Optional
     ax1.set_title("Overall Probe Performance by Layer")
     ax1.legend()
     ax1.grid(True)
+
+    # Add baseline lines
+    ax1.axhline(y=baseline["macro_f1"], color='r', linestyle='--', label='Majority Baseline (Macro F1)')
+    ax1.axhline(y=baseline["weighted_f1"], color='g', linestyle='--', label='Majority Baseline (Weighted F1)')
+    ax1.legend()
 
     # Plot per-class accuracy heatmap
     dep_types = list(results[layers[0]]["per_class_accuracy"].keys())
@@ -181,25 +175,86 @@ def plot_layer_results(results: Dict[int, Dict[str, float]], save_path: Optional
     plt.show()
 
 
-def main(test_loader: DataLoader, probes: Dict[int, DependencyProbe], model: UDTransformer, train_toks: str = "tail"):
-    """Main evaluation function.
+def compute_majority_baseline(test_loader: DataLoader) -> Dict[str, float]:
+    """Compute baseline metrics assuming we always predict the most frequent class.
 
     Args:
         test_loader: DataLoader for test set
-        model_path: Path to saved probes
-        train_toks: Whether to use head or tail of dependency
+
+    Returns:
+        Dictionary containing baseline metrics
     """
-    # Evaluate each probe
+    # Collect all labels
+    all_labels = []
+    for batch in test_loader:
+        labels = batch["labels"]
+        dep_mask = batch["dep_mask"]
+        labels_masked = labels[dep_mask]
+        all_labels.append(labels_masked)
+
+    # Concatenate all labels
+    all_labels = torch.cat(all_labels, dim=0).numpy()
+
+    # Find most frequent class
+    majority_class = all_labels.sum(axis=0).argmax()
+
+    # Create predictions array - all zeros except for majority class
+    all_preds = np.zeros_like(all_labels)
+    all_preds[:, majority_class] = 1
+
+    # Compute metrics
+    baseline_metrics = {
+        "macro_f1": f1_score(
+            all_labels.argmax(axis=1),
+            all_preds.argmax(axis=1),
+            average='macro'
+        ),
+        "weighted_f1": f1_score(
+            all_labels.argmax(axis=1),
+            all_preds.argmax(axis=1),
+            average='weighted'
+        )
+    }
+
+    # Also compute class frequencies for context
+    class_frequencies = all_labels.sum(axis=0) / len(all_labels)
+    baseline_metrics["class_frequencies"] = class_frequencies
+    baseline_metrics["majority_class"] = majority_class
+
+    return baseline_metrics
+
+
+def main(test_loader: DataLoader, probes: Dict[int, DependencyProbe], model: UDTransformer, train_toks: str = "tail"):
+    """Main evaluation function."""
+    # First compute baseline
+    print("\nComputing majority class baseline...")
+    baseline = compute_majority_baseline(test_loader)
+    print(f"Majority class baseline:")
+    print(f"  Macro F1: {baseline['macro_f1']:.3f}")
+    print(f"  Weighted F1: {baseline['weighted_f1']:.3f}")
+    print(f"\nClass frequencies:")
+    dep_table = DependencyTask.dependency_table()
+    idx_to_dep = {v-1: k for k, v in dep_table.items()}
+    for i, freq in enumerate(baseline["class_frequencies"]):
+        if freq > 0.01:  # Only show classes with >1% frequency
+            print(f"  {idx_to_dep[i]}: {freq:.3f}")
+    print(f"\nMajority class: {idx_to_dep[baseline['majority_class']]}")
+
+    # Then evaluate probes as before
     results = {}
     for layer, probe in probes.items():
         print(f"\nEvaluating layer {layer}")
         metrics = evaluate_probe(model, probe, test_loader, layer, train_toks)
         results[layer] = metrics
         print(f"Balanced accuracy: {metrics['balanced_accuracy']:.3f}")
+        print(f"Improvement over majority baseline:")
+        print(f"  Macro F1: {metrics['macro_f1'] - baseline['macro_f1']:.3f}")
+        print(f"  Weighted F1: {metrics['weighted_f1'] - baseline['weighted_f1']:.3f}")
 
     # Plot results
-    plot_layer_results(results, save_path=f"figures/{train_toks}_results_layers_{min(probes.keys())}-{max(probes.keys())}.png")
+    plot_layer_results(results, baseline, save_path=f"figures/{train_toks}_results_layers_{min(probes.keys())}-{max(probes.keys())}.png")
 
-    # Save results
+    # Save results with baseline
+    results["baseline"] = baseline
     with open(f"data/{train_toks}_results_layers_{min(probes.keys())}-{max(probes.keys())}.pkl", "wb") as f:
         pickle.dump(results, f)
