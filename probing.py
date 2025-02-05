@@ -1,6 +1,6 @@
 """Linear probes for dependency parsing"""
 
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -20,32 +20,46 @@ class DependencyProbe(nn.Module):
         self.probe = nn.Linear(input_dim, num_relations)
 
     def forward(self, embeddings: torch.Tensor) -> torch.Tensor:
-        """Maps token embeddings to dependency relation logits.
+        """Maps token embeddings to dependency relation logits."""
+        return self.probe(embeddings)
 
-        Args:
-            embeddings: Token embeddings [batch_size, seq_len, hidden_dim]
 
-        Returns:
-            logits: Scores for each dependency relation at each position
-                   [batch_size, seq_len, num_relations]
-                   Higher values indicate higher probability of that relation
-                   applying to that token position
-        """
-        # Project from hidden_dim to num_relations
-        # For each token, get a score for each possible dependency relation
-        logits = self.probe(embeddings)  # [batch_size, seq_len, num_relations]
-        return logits
+def compute_loss(probe: DependencyProbe,
+                model: UDTransformer,
+                batch: Dict,
+                layer: int,
+                criterion: nn.Module,
+                device: torch.device,
+                train_toks: str = "tail") -> Tuple[torch.Tensor, torch.Tensor]:
+    """Compute loss for a single batch.
 
-# Modified BCE loss that handles padding
-def masked_bce_loss(scores, labels, dep_mask, criterion):
-    """Compute BCE loss only on actual tokens (not padding)."""
-    num_relations = scores.size(2)
+    Args:
+        probe: The probe model
+        model: The transformer model
+        batch: Batch of data
+        layer: Layer to probe
+        criterion: Loss function
+        device: Device to use
 
-    # Apply mask to both scores and labels
-    scores_masked = scores[dep_mask].reshape(-1, num_relations)
-    labels_masked = labels[dep_mask].reshape(-1, num_relations)
+    Returns:
+        loss: The computed loss
+        scores: The probe's predictions
+    """
+    # Get activations and compute scores
+    activations = model.get_activations(batch, layer_idx=layer, train_toks=train_toks)
+    scores = probe(activations)
 
-    return criterion(scores_masked, labels_masked)
+    # Get labels and mask
+    labels = batch["labels"].to(device)
+    dep_mask = batch["dep_mask"].to(device)
+
+    # Compute masked loss
+    scores_masked = scores[dep_mask].reshape(-1, scores.size(-1))
+    labels_masked = labels[dep_mask].reshape(-1, labels.size(-1))
+    loss = criterion(scores_masked, labels_masked)
+
+    return loss, scores
+
 
 def train_probe(model: UDTransformer,
                 train_loader: DataLoader,
@@ -53,8 +67,9 @@ def train_probe(model: UDTransformer,
                 layer: int = -1,
                 learning_rate: float = 1e-3,
                 num_epochs: int = 10,
-                run_name: Optional[str] = None):
-    """Train dependency probe"""
+                train_toks: str = "tail",
+                run_name: Optional[str] = None) -> DependencyProbe:
+    """Train dependency probe with integrated evaluation."""
 
     # Initialize wandb
     wandb.init(
@@ -62,6 +77,7 @@ def train_probe(model: UDTransformer,
         name=run_name or f"layer_{layer}_probe",
         config={
             "layer": layer,
+            "train_toks": train_toks,
             "learning_rate": learning_rate,
             "num_epochs": num_epochs,
             "model": model.model.cfg.model_name,
@@ -71,49 +87,43 @@ def train_probe(model: UDTransformer,
 
     device = torch.device("cuda" if torch.cuda.is_available() else "mps")
     print(f"Using device: {device}")
+
+    # Initialize models and optimizer
     hidden_dim = model.model.cfg.d_model
     num_relations = len(DependencyTask.dependency_table())
-
     probe = DependencyProbe(hidden_dim, num_relations).to(device)
     optimizer = torch.optim.Adam(probe.parameters(), lr=learning_rate)
-    # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=0)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=0)
     criterion = nn.BCEWithLogitsLoss(reduction='mean')
+
+    # Track best model
+    best_dev_loss = float('inf')
+    best_epoch = -1
+    best_state = None
 
     print(f"\nTraining probe for layer {layer}")
     for epoch in range(num_epochs):
-
+        # Training
         probe.train()
         total_loss = 0
         num_batches = 0
 
-        # Training loop
         progress_bar = tqdm(train_loader, desc=f'Epoch {epoch+1}/{num_epochs}')
         for batch_idx, batch in enumerate(progress_bar):
-            # Clear cache before getting new activations
-            torch.cuda.empty_cache()
-
-            activations = model.get_activations(batch, layer_idx=layer)
-            scores = probe(activations)
-
-            # Free memory
-            del activations
-
-            labels = batch["labels"].to(device)
-            dep_mask = batch["dep_mask"].to(device)
-            loss = masked_bce_loss(scores, labels, dep_mask, criterion)
-
-            # Free more memory
-            del scores
-
-            loss.backward()
-            optimizer.step()
             optimizer.zero_grad()
 
+            # Compute loss and update
+            loss, _ = compute_loss(probe, model, batch, layer, criterion, device, train_toks=train_toks)
+            loss.backward()
+            optimizer.step()
+
+            # Update metrics
             total_loss += loss.item()
             num_batches += 1
             current_loss = total_loss / num_batches
-            progress_bar.set_postfix({'loss': current_loss})
+            progress_bar.set_postfix({'train_loss': current_loss})
 
+            # Log batch metrics
             wandb.log({
                 "train/batch_loss": loss.item(),
                 "train/running_loss": current_loss,
@@ -121,40 +131,42 @@ def train_probe(model: UDTransformer,
                 "batch": batch_idx
             })
 
-            avg_train_loss = total_loss / num_batches
-            # scheduler.step(avg_train_loss)
-            print(f"Epoch {epoch+1} - Avg train loss: {current_loss:.4f}")
+        # Evaluate on dev set
+        probe.eval()
+        total_loss = 0
+        num_batches = 0
 
+        with torch.no_grad():
+            for batch in tqdm(dev_loader, desc='Evaluating'):
+                loss, _ = compute_loss(probe, model, batch, layer, criterion, device, train_toks=train_toks)
+                total_loss += loss.item()
+                num_batches += 1
+
+        dev_loss = total_loss / num_batches
+        scheduler.step(dev_loss)
+        # Log epoch metrics
+        wandb.log({
+            "train/epoch_loss": current_loss,
+            "dev/epoch_loss": dev_loss,
+            "epoch": epoch
+        })
+
+        print(f"Epoch {epoch+1} - Train loss: {current_loss:.4f}, Dev loss: {dev_loss:.4f}")
+
+        # Save best model
+        if dev_loss < best_dev_loss:
+            best_dev_loss = dev_loss
+            best_epoch = epoch
+            best_state = probe.state_dict().copy()
+            print(f"New best model! Dev loss: {dev_loss:.4f}")
+
+        # Early stopping check
+        if epoch - best_epoch > 3:  # 3 epochs patience
+            print(f"No improvement for 3 epochs, stopping early")
+            break
+
+    # Restore best model
+    probe.load_state_dict(best_state)
     wandb.finish()
+
     return probe
-
-def evaluate_probe(model: UDTransformer,
-                   probe: DependencyProbe,
-                   dev_loader: DataLoader,
-                   layer: int = -1):
-    """Evaluate probe"""
-    # Evaluate on dev set
-
-    probe.eval()
-    dev_loss = 0
-    num_dev_batches = 0
-    criterion = nn.BCEWithLogitsLoss(reduction='mean')
-
-    print("\nEvaluating on dev set...")
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "mps")
-
-    with torch.no_grad():
-        for dev_batch_idx, batch in enumerate(tqdm(dev_loader)):
-            activations = model.get_activations(batch, layer_idx=layer)
-
-            labels = batch["labels"].to(device)
-            dep_mask = batch["dep_mask"].to(device)
-            scores = probe(activations)
-            loss = masked_bce_loss(scores, labels, dep_mask, criterion)
-            dev_loss += loss.item()
-            num_dev_batches += 1
-
-    avg_dev_loss = dev_loss / num_dev_batches
-
-    print(f"Avg dev loss: {avg_dev_loss:.4f}")

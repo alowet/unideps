@@ -24,13 +24,13 @@ class UDTransformer:
 
         self.model = HookedSAETransformer.from_pretrained(model_name, device=device)
 
-    def get_token_masks(self, sentences: List[UDSentence], do_print: bool = False):
+    def get_token_masks(self, sentences: List[UDSentence], do_print: bool = False, train_toks: str = "tail"):
         """Get token masks for sentences.
 
         Args:
             sentences: List of UDSentence objects
             do_print: Whether to print validation examples
-
+            train_toks: "tail" or "head": whether to use the tail of the dependency relation or the head. Right now only tail is supported.
         Returns:
             List of token masks
         """
@@ -108,7 +108,7 @@ class UDTransformer:
         return final_model_token_masks
 
 
-    def get_activations(self, batch: Dict, layer_idx: int) -> torch.Tensor:
+    def get_activations(self, batch: Dict, layer_idx: int, train_toks: str = "tail") -> torch.Tensor:
         """Get aligned token-level embeddings.
 
         Args:
@@ -121,7 +121,7 @@ class UDTransformer:
         """
 
         # Get encodings for all sentences
-        token_masks = self.get_token_masks(batch["sentences"])
+        token_masks = self.get_token_masks(batch["sentences"], train_toks=train_toks)
 
         # Run model with cache, but only store the layer we want
         with torch.no_grad():

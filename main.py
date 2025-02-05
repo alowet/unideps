@@ -1,10 +1,11 @@
 # %% Imports
+import os
 import pickle
 
 from data_utils import collate_fn
 from load_data import UDDataset
 from model_utils import UDTransformer
-from probing import evaluate_probe, train_probe
+from probing import train_probe
 from torch.cuda import empty_cache
 from torch.utils.data import DataLoader
 
@@ -34,20 +35,26 @@ model = UDTransformer()
 # Train probes for different layers
 # Note this is inefficient in that it re-runs the model (one forward pass per layer), though it stops at layer+1 each time
 probes = {}
-for layer in range(model.model.cfg.n_layers):
+train_toks = "tail"
+# for layer in range(model.model.cfg.n_layers):
+for layer in [11]:
     probe = train_probe(
         model,
         train_loader,
         dev_loader,
-        layer=layer
+        layer=layer,
+        train_toks=train_toks
     )
-    evaluate_probe(model, probe, dev_loader, layer=layer)
     probes[layer] = probe.cpu()
     del probe
     empty_cache()
 
-with open("data/probes.pkl", "wb") as f:
-    pickle.dump(probes, f)
+# %%
+# comment this out if you want to overwrite existing probes
+if not os.path.exists(f"data/{train_toks}.pkl"):
+    with open(f"data/{train_toks}.pkl", "wb") as f:
+        pickle.dump(probes, f)
 
+# %%
 # Visualize results
 # ... visualization code ...
