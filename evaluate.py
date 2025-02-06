@@ -255,7 +255,7 @@ def main(
     results = {}
     for layer, probe in probes.items():
         print(f"\nEvaluating layer {layer}")
-        metrics = evaluate_probe(model, probe, test_loader, layer, train_toks, device)
+        metrics = evaluate_probe(model, probe, test_loader, device, layer, train_toks)
         results[layer] = metrics
         print(f"Balanced accuracy: {metrics['balanced_accuracy']:.3f}")
         print(f"Improvement over majority baseline:")

@@ -14,8 +14,7 @@ from torch.cuda import empty_cache
 from torch.utils.data import DataLoader
 
 # %% Set up devices
-# For now, we're using a single GPU
-
+# For now, we're using a single GPU, but in future, could add an option for UDTransformer and SAE to live on different devices
 device_model = torch.device("cuda") if torch.cuda.is_available() else torch.device("mps")
 device_sae = device_model
 
@@ -103,6 +102,7 @@ display_dashboard(
 #         pickle.dump(probes, f)
 
 # %% Evaluate
+
 test_data = UDDataset("data/UD_English-EWT/en_ewt-ud-test.conllu", max_sentences=1024)
 test_loader = DataLoader(
     test_data,
@@ -114,8 +114,8 @@ evaluate_main(
     test_loader,
     probes,
     model,
-    device_model,
-    train_toks=train_toks
+    train_toks=train_toks,
+    device=device_model
     )
 
 
