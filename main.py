@@ -1,10 +1,10 @@
 # %% Imports
+import importlib
 import os
 import pickle
 
 import torch
 from analyze_sae import main as analyze_sae_main
-from configure_cuda import *
 from data_utils import collate_fn
 from evaluate import main as evaluate_main
 from load_data import UDDataset
@@ -14,20 +14,11 @@ from torch.cuda import empty_cache
 from torch.utils.data import DataLoader
 
 # %% Set up devices
+# For now, we're using a single GPU
 
-if torch.cuda.device_count() > 1:
-    device_model = torch.device("cuda:0")
-    device_sae = torch.device("cuda:1")
-else:
-    if torch.cuda.is_available():
-        device_model = torch.device("cuda")
-    elif torch.mps.is_available():
-        device_model = torch.device("mps")
-    else:
-        device_model = torch.device("cpu")
-    device_sae = device_model
+device_model = torch.device("cuda") if torch.cuda.is_available() else torch.device("mps")
+device_sae = device_model
 
-print(f"Using devices - Model: {device_model}, SAE: {device_sae}")
 
 # %% Load data
 train_data = UDDataset("data/UD_English-EWT/en_ewt-ud-train.conllu", max_sentences=1024)
@@ -45,14 +36,45 @@ dev_loader = DataLoader(
     batch_size=128,
     collate_fn=collate_fn
 )
+# %%
+train_toks = "tail"
+model_path = f"data/probes/{train_toks}.pkl"
 
 # %%
 # Initialize model
 model = UDTransformer(model_name="gemma-2-2b", device=device_model)
 
+
 # %%
-train_toks = "tail"
-model_path = f"data/probes/{train_toks}.pkl"
+# Load already trained probes
+with open(model_path, "rb") as f:
+    probes = pickle.load(f)
+
+# %%
+# for speed, select subset of layers
+# probes = {k: v for k, v in probes.items() if k < 7}
+
+# %%
+
+analyze_sae_main(
+    probes,
+    train_toks=train_toks,
+    device_sae=device_sae
+)
+
+# %%
+# A feature that really jumps out here is Layer 1: Feature 7634, which has a cosine similarity of 0.387 with the conj relation
+# Inspect this feature
+from analyze_sae import display_dashboard
+
+display_dashboard(
+    sae_release="gemma-scope-2b-pt-res-canonical",
+    sae_id="layer_1/width_16k/canonical",
+    latent_idx=7634,
+    width=800,
+    height=600
+)
+
 
 # # %%
 # # Train probes for different layers
@@ -79,13 +101,6 @@ model_path = f"data/probes/{train_toks}.pkl"
 # if not os.path.exists(model_path):
 #     with open(model_path, "wb") as f:
 #         pickle.dump(probes, f)
-# %%
-# Load already trained probes
-with open(model_path, "rb") as f:
-    probes = pickle.load(f)
-# %%
-# for speed, select subset of layers
-probes = {k: v for k, v in probes.items() if k < 7}
 
 # %% Evaluate
 test_data = UDDataset("data/UD_English-EWT/en_ewt-ud-test.conllu", max_sentences=1024)
@@ -103,13 +118,5 @@ evaluate_main(
     train_toks=train_toks
     )
 
-# %%
-
-analyze_sae_main(
-    probes,
-    train_toks=train_toks,
-    device_model=device_model,
-    device_sae=device_sae
-)
 
 # %%

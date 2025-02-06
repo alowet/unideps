@@ -1,5 +1,6 @@
 """Analyze relationship between probe weights and SAE features."""
 
+import gc
 from typing import Dict, List, Optional, Tuple
 
 import matplotlib.pyplot as plt
@@ -13,10 +14,6 @@ from sae_lens.toolkit.pretrained_saes_directory import get_pretrained_saes_direc
 from task import DependencyTask
 from tqdm import tqdm
 
-
-def cosine_similarity(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    """Compute cosine similarity between two vectors."""
-    return torch.nn.functional.cosine_similarity(a.unsqueeze(0), b.unsqueeze(0))
 
 def display_dashboard(
     sae_release="gemma-scope-2b-pt-res-canonical",
@@ -34,31 +31,43 @@ def display_dashboard(
     display(IFrame(url, width=width, height=height))
 
 
+def cleanup_gpu_memory():
+    """Delete all CUDA tensors in the current scope."""
+    # Get all variables in current scope
+    for name, value in list(locals().items()):
+        # Check if it's a CUDA tensor
+        if isinstance(value, torch.Tensor) and value.is_cuda:
+            print(f"Deleting {name} from locals")
+            del locals()[name]
+
+    # Force CUDA memory cleanup
+    torch.cuda.empty_cache()
+    gc.collect()
+
+
 def analyze_probe_sae_alignment(
     probes: Dict[int, nn.Module],
-    device_model: torch.device | None = None,
     device_sae: torch.device | None = None,
     top_k: int = 5,
     plot_dashboards: bool = False,
-    num_random_samples: int = 1000,
+    num_random_samples: int = 10,
+    batch_size: int = 8192,  # Process this many features at a time
 ) -> Tuple[Dict[int, Dict[str, List[Tuple[int, float]]]], torch.Tensor, torch.Tensor]:
     """Analyze alignment between probe weights and SAE features.
 
     Args:
         probes: Dictionary mapping layer indices to probes
-        device_model: Device for transformer model and probes
         device_sae: Device for SAE and similarity computations
         top_k: Number of top features to return
         plot_dashboards: Whether to display feature dashboards
         num_random_samples: Number of random samples for null distribution
+        batch_size: Number of features to process at a time
     """
-    # Set up devices
-    if device_model is None:
-        device_model = torch.device("cuda:0" if torch.cuda.is_available() else "mps")
     if device_sae is None:
-        device_sae = torch.device("cuda:1" if torch.cuda.device_count() > 1 else device_model)
+        device_sae = torch.device("cuda:1" if torch.cuda.device_count() > 1 else "cuda")
 
-    print(f"Using devices - Model: {device_model}, SAE: {device_sae}")
+    # Disable gradient computation
+    torch.set_grad_enabled(False)
 
     gemmascope_sae_release = "gemma-scope-2b-pt-res-canonical"
 
@@ -76,39 +85,79 @@ def analyze_probe_sae_alignment(
     results = {}
 
     for layer_idx, layer in enumerate(tqdm(layers, desc="Analyzing layers")):
-        # Load pretrained SAE on second GPU
+        # Load pretrained SAE
         gemmascope_sae_id = f"layer_{layer}/width_16k/canonical"
         sae = SAE.from_pretrained(gemmascope_sae_release, gemmascope_sae_id, device=str(device_sae))[0]
 
-        # Move probe to first GPU
-        probe = probes[layer].to(device_model)
-        weights = probe.probe.weight  # [num_relations, hidden_dim]
+        # Move probe to SAE GPU and detach from computation graph
+        probe = probes[layer].to(device_sae)
+        weights = probe.probe.weight.detach()  # [num_relations, hidden_dim]
+        sae_features = sae.W_enc.detach()  # [hidden_dim, num_features]
 
-        # Move weights to SAE GPU for computations
-        weights = weights.to(device_sae)
-        sae_features = sae.W_enc  # [hidden_dim, num_features]
-
-        # Normalize vectors on SAE GPU
+        # Normalize vectors
         weights_norm = torch.nn.functional.normalize(weights, p=2, dim=1)
         features_norm = torch.nn.functional.normalize(sae_features, p=2, dim=0)
 
-        # Compute similarities on SAE GPU
-        similarities = torch.matmul(weights_norm, features_norm)
+        # Compute similarities in batches
+        num_features = features_norm.size(1)
+        similarities_list = []
+
+        for start_idx in range(0, num_features, batch_size):
+            end_idx = min(start_idx + batch_size, num_features)
+            # Compute similarities for this batch of features
+            batch_similarities = torch.matmul(
+                weights_norm,
+                features_norm[:, start_idx:end_idx]
+            )
+            similarities_list.append(batch_similarities)
+
+        # Concatenate all batches
+        similarities = torch.cat(similarities_list, dim=1)
 
         # Get max similarity for each relation
-        max_sims, _ = similarities.max(dim=1)
+        max_sims, _ = similarities.max(dim=1)  # [num_relations]
 
-        # Compute null distribution on SAE GPU
+        # Compute null distribution with streaming max computation
         null_sims = []
         for _ in range(num_random_samples):
-            permuted_features = torch.stack([
-                features_norm[torch.randperm(features_norm.size(0), device=device_sae), i]
-                for i in range(features_norm.size(1))
-            ], dim=1)
-            null_similarities = torch.matmul(weights_norm, permuted_features)
-            null_sims.append(null_similarities.max(dim=1)[0])
 
-        # Compute z-scores (still on SAE GPU)
+            # Initialize max similarities for this sample
+            current_max_sims = torch.full(
+                (weights_norm.size(0),),
+                float('-inf'),
+                device=device_sae
+            )
+
+            for start_idx in range(0, num_features, batch_size):
+                end_idx = min(start_idx + batch_size, num_features)
+
+                # Randomly permute each dimension independently for this batch
+                permuted_features = torch.stack([
+                    features_norm[torch.randperm(features_norm.size(0), device=device_sae), i]
+                    for i in range(start_idx, end_idx)
+                ], dim=1)
+
+                # Compute similarities for this small batch
+                batch_similarities = torch.matmul(weights_norm, permuted_features)
+
+                # Update running maximum
+                current_max_sims = torch.maximum(
+                    current_max_sims,
+                    batch_similarities.max(dim=1)[0]
+                )
+
+                # Clear intermediate tensors
+                del batch_similarities, permuted_features
+                torch.cuda.empty_cache()
+
+            # Store max similarities for this sample
+            null_sims.append(current_max_sims.clone())
+
+            # Clear memory after each sample
+            del current_max_sims
+            torch.cuda.empty_cache()
+
+        # Stack all samples and compute statistics
         null_sims = torch.stack(null_sims)
         null_mean = null_sims.mean(dim=0)
         null_std = null_sims.std(dim=0)
@@ -139,10 +188,11 @@ def analyze_probe_sae_alignment(
 
         results[layer] = layer_results
 
-        # Clean up GPU memory
-        probe = probe.cpu()
-        del sae, weights, weights_norm, features_norm, similarities
-        torch.cuda.empty_cache()
+        # Cleanup
+        cleanup_gpu_memory()
+
+    # Re-enable gradients if necessary
+    torch.set_grad_enabled(True)
 
     return results, max_similarities, relative_similarities
 
@@ -217,15 +267,13 @@ def plot_sae_alignment_heatmaps(
 def main(
     probes: Dict[int, nn.Module],
     train_toks: str = "tail",
-    device_model: Optional[torch.device] = None,
     device_sae: Optional[torch.device] = None
 ):
     """Main analysis function."""
     print("\nAnalyzing probe-SAE alignment...")
     results, max_sims, rel_sims = analyze_probe_sae_alignment(
         probes,
-        device_model=device_model,
-        device_sae=device_sae
+        device_sae
     )
 
     print("\nResults:")
