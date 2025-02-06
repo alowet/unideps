@@ -1,7 +1,7 @@
 """Functions for loading and processing UD_English_EWT data in CoNLL-U format"""
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import torch
 from conllu import parse_incr
@@ -13,7 +13,7 @@ class UDSentence:
     """Holds data for a single sentence from UD dataset"""
     tokens: List[str]  # Words/tokens
     ids: List[str]    # Token IDs (can be non-sequential due to multi-word tokens)
-    deps: List[str]   # Enhanced dependencies from DEPS column
+    deps: List[List[Tuple[str, int]]]   # Enhanced dependencies: list of (relation, head_idx) pairs per token
     upos: List[str]   # Universal POS tags
     text: str         # Original text
 
@@ -35,7 +35,7 @@ class UDDataset(Dataset):
                 sentence = UDSentence(
                     tokens=[t["form"] for t in tokenlist],
                     ids=[t["id"] for t in tokenlist],
-                    deps=[t["deps"] if t["deps"] else "_" for t in tokenlist],
+                    deps=[t["deps"] for t in tokenlist],  # formatted as lists of (relation, head_idx) tuples
                     upos=[t["upos"] for t in tokenlist],
                     text=tokenlist.metadata["text"]
                 )

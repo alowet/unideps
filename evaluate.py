@@ -45,8 +45,7 @@ def evaluate_probe(
     probe.eval()
 
     # Get mapping of indices to relation names
-    dep_table = DependencyTask.dependency_table()
-    idx_to_dep = {v-1: k for k, v in dep_table.items()}
+    idx_to_dep = DependencyTask.dependency_table()
 
     all_preds = []
     all_labels = []
@@ -244,8 +243,7 @@ def main(
     print(f"  Macro F1: {baseline['macro_f1']:.3f}")
     print(f"  Weighted F1: {baseline['weighted_f1']:.3f}")
     print(f"\nClass frequencies:")
-    dep_table = DependencyTask.dependency_table()
-    idx_to_dep = {v-1: k for k, v in dep_table.items()}
+    idx_to_dep = DependencyTask.dependency_table()
     for i, freq in enumerate(baseline["class_frequencies"]):
         if freq > 0.01:  # Only show classes with >1% frequency
             print(f"  {idx_to_dep[i]}: {freq:.3f}")

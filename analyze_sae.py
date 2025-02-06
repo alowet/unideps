@@ -72,8 +72,7 @@ def analyze_probe_sae_alignment(
     gemmascope_sae_release = "gemma-scope-2b-pt-res-canonical"
 
     # Get mapping of indices to relation names
-    dep_table = DependencyTask.dependency_table()
-    idx_to_dep = {v-1: k for k, v in dep_table.items()}
+    idx_to_dep = DependencyTask.dependency_table()
 
     # Get all dependency types and layers
     dep_types = sorted(list(idx_to_dep.values()))

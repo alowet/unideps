@@ -40,31 +40,39 @@ def compute_loss(probe: DependencyProbe,
         layer: Layer to probe
         criterion: Loss function
         device: Device to use
-        train_toks: Whether to use head or tail of dependency
+        train_toks: Whether to use head or tail of dependency, or some other token entirely (e.g. first or last)
         return_type: Whether to return loss (training/dev) or predictions (testing)
     Returns:
         loss: The computed loss
         scores: The probe's predictions
     """
     # Get activations and compute scores
-    activations = model.get_activations(batch, layer_idx=layer, train_toks=train_toks)
-    scores = probe(activations)
+    activations = model.get_activations(batch, layer_idx=layer, train_toks=train_toks)  # size [batch, max_len, hidden_dim]
+    scores = probe(activations)  # size [batch, max_len, num_relations]
 
     # Get labels and mask
-    labels = batch["labels"].to(device)
-    dep_mask = batch["dep_mask"].to(device)
-    labels_masked = labels[dep_mask]
+    relations = batch["relations"].to(device)  # size [batch, max_tokens, num_relations]
+    # integer tensor, where each int is the index of the head token for the relation
+    head_nums = batch["head_nums"].to(device)  # size [batch, max_heads, num_relations]
+
+    relation_mask = batch["relation_mask"].to(device)  # size [batch, max_tokens]
+    head_mask = batch["head_mask"].to(device)  # size [batch, max_heads]
+
+    if train_toks == "head":
+        raise NotImplementedError("Head token probing not implemented")
+    else:
+        relations_masked = relations[relation_mask]
 
     if return_type == "loss":
         # Compute masked loss
-        scores_masked = scores[dep_mask]
-        loss = criterion(scores_masked, labels_masked)
+        scores_masked = scores[relation_mask]
+        loss = criterion(scores_masked, relations_masked)
         return loss, scores
 
     else:  # return_type == "preds":
         preds = torch.sigmoid(scores) > 0.5  # sigmoid since we're using BCE loss
-        preds_masked = preds[dep_mask]
-        return preds_masked, labels_masked
+        preds_masked = preds[relation_mask]
+        return preds_masked, relations_masked
 
 
 def train_probe(
