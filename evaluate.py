@@ -45,38 +45,39 @@ def evaluate_probe(
     probe.eval()
 
     # Get mapping of indices to relation names
-    idx_to_dep = DependencyTask.dependency_table()
+    dep_to_idx = DependencyTask.dependency_table()
+    idx_to_dep = {v: k for k, v in dep_to_idx.items()}
 
     all_preds = []
-    all_labels = []
+    all_relations = []
 
     with torch.no_grad():
         for batch in tqdm(test_loader, desc="Evaluating"):
             # Get model outputs
-            preds_masked, labels_masked = compute_loss(probe, model, batch, layer, device, train_toks, return_type="preds")
+            preds_masked, relations_masked = compute_loss(probe, model, batch, layer, device, train_toks, return_type="preds")
 
             all_preds.append(preds_masked.cpu())
-            all_labels.append(labels_masked.cpu())
+            all_relations.append(relations_masked.cpu())
 
-    # Concatenate all predictions and labels
+    # Concatenate all predictions and relations
     all_preds = torch.cat(all_preds, dim=0).numpy()
-    all_labels = torch.cat(all_labels, dim=0).numpy()
+    all_relations = torch.cat(all_relations, dim=0).numpy()
 
     # Compute metrics
     metrics = {}
 
     # Overall metrics
     metrics["balanced_accuracy"] = balanced_accuracy_score(
-        all_labels.argmax(axis=1),
+        all_relations.argmax(axis=1),
         all_preds.argmax(axis=1)
     )
     metrics["macro_f1"] = f1_score(
-        all_labels.argmax(axis=1),
+        all_relations.argmax(axis=1),
         all_preds.argmax(axis=1),
         average='macro'  # Treats all classes equally regardless of support
     )
     metrics["weighted_f1"] = f1_score(
-        all_labels.argmax(axis=1),
+        all_relations.argmax(axis=1),
         all_preds.argmax(axis=1),
         average='weighted'  # Weights by class support
     )
@@ -84,9 +85,9 @@ def evaluate_probe(
     # Per-class metrics
     per_class_acc = {}
     per_class_f1 = {}
-    for i in range(all_labels.shape[1]):
-        acc = balanced_accuracy_score(all_labels[:, i], all_preds[:, i])
-        f1 = f1_score(all_labels[:, i], all_preds[:, i])
+    for i in range(all_relations.shape[1]):
+        acc = balanced_accuracy_score(all_relations[:, i], all_preds[:, i])
+        f1 = f1_score(all_relations[:, i], all_preds[:, i])
         per_class_acc[idx_to_dep[i]] = acc
         per_class_f1[idx_to_dep[i]] = f1
     metrics["per_class_accuracy"] = per_class_acc
@@ -183,40 +184,40 @@ def compute_majority_baseline(test_loader: DataLoader) -> Dict[str, float]:
     Returns:
         Dictionary containing baseline metrics
     """
-    # Collect all labels
-    all_labels = []
+    # Collect all relations
+    all_relations = []
     for batch in test_loader:
-        labels = batch["labels"]
-        dep_mask = batch["dep_mask"]
-        labels_masked = labels[dep_mask]
-        all_labels.append(labels_masked)
+        relations = batch["relations"]
+        relation_mask = batch["relation_mask"]
+        relations_masked = relations[relation_mask]
+        all_relations.append(relations_masked)
 
-    # Concatenate all labels
-    all_labels = torch.cat(all_labels, dim=0).numpy()
+    # Concatenate all relations
+    all_relations = torch.cat(all_relations, dim=0).numpy()
 
     # Find most frequent class
-    majority_class = all_labels.sum(axis=0).argmax()
+    majority_class = all_relations.sum(axis=0).argmax()
 
     # Create predictions array - all zeros except for majority class
-    all_preds = np.zeros_like(all_labels)
+    all_preds = np.zeros_like(all_relations)
     all_preds[:, majority_class] = 1
 
     # Compute metrics
     baseline_metrics = {
         "macro_f1": f1_score(
-            all_labels.argmax(axis=1),
+            all_relations.argmax(axis=1),
             all_preds.argmax(axis=1),
             average='macro'
         ),
         "weighted_f1": f1_score(
-            all_labels.argmax(axis=1),
+            all_relations.argmax(axis=1),
             all_preds.argmax(axis=1),
             average='weighted'
         )
     }
 
     # Also compute class frequencies for context
-    class_frequencies = all_labels.sum(axis=0) / len(all_labels)
+    class_frequencies = all_relations.sum(axis=0) / len(all_relations)
     baseline_metrics["class_frequencies"] = class_frequencies
     baseline_metrics["majority_class"] = majority_class
 
@@ -243,7 +244,8 @@ def main(
     print(f"  Macro F1: {baseline['macro_f1']:.3f}")
     print(f"  Weighted F1: {baseline['weighted_f1']:.3f}")
     print(f"\nClass frequencies:")
-    idx_to_dep = DependencyTask.dependency_table()
+    dep_to_idx = DependencyTask.dependency_table()
+    idx_to_dep = {v: k for k, v in dep_to_idx.items()}
     for i, freq in enumerate(baseline["class_frequencies"]):
         if freq > 0.01:  # Only show classes with >1% frequency
             print(f"  {idx_to_dep[i]}: {freq:.3f}")

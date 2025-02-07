@@ -1,6 +1,7 @@
 data/*
 wandb/*
 figures/*
+slurm/*
 *.pyc
 *.pkl
 *.pt

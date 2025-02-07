@@ -21,6 +21,7 @@ device_sae = device_model
 
 # %%
 train_toks = "tail"
+max_layer =
 model_path = f"data/probes/{train_toks}.pkl"
 
 
@@ -52,14 +53,14 @@ model = UDTransformer(model_name="gemma-2-2b", device=device_model)
 #     probes = pickle.load(f)
 
 
-# # %%
+#  %%
 # Train probes for different layers
 # Note this is inefficient in that it re-runs the model (one forward pass per layer), though it stops at layer+1 each time
 # comment this block out if you just want to load probes
 
 probes = {}
 for layer in range(model.model.cfg.n_layers):
-# for layer in range(7):
+# for layer in range(1):
     probe = train_probe(
         model,
         train_loader,
@@ -84,6 +85,9 @@ with open(model_path, "wb") as f:
 # probes = {k: v for k, v in probes.items() if k < 7}
 
 # %%
+# import analyze_sae
+# importlib.reload(analyze_sae)
+# from analyze_sae import main as analyze_sae_main
 
 analyze_sae_main(
     probes,
@@ -105,6 +109,9 @@ analyze_sae_main(
 # )
 
 # %% Evaluate
+# import evaluate
+# importlib.reload(evaluate)
+# from evaluate import main as evaluate_main
 
 test_data = UDDataset("data/UD_English-EWT/en_ewt-ud-test.conllu", max_sentences=1024)
 test_loader = DataLoader(
