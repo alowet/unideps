@@ -31,15 +31,10 @@ class UDTransformer:
         Args:
             sentences: List of UDSentence objects
             do_print: Whether to print validation examples
-            train_toks: Which tokens to use for training:
-                - "tail": use tail token of dependency (default)
-                - "head": use head token of dependency
-                - "first": use first token in sentence
-                - "last": use last token in sentence
+            train_toks: Which tokens to use for training
         Returns:
             List of token masks
         """
-        # Now we use the provided text directly
         sentence_texts = [sent.text for sent in sentences]
         model_tokens = self.model.to_str_tokens(sentence_texts)
 
@@ -48,35 +43,37 @@ class UDTransformer:
 
         for sent_idx, (sent, model_tokens_sent) in enumerate(zip(sentences, model_tokens)):
             # Map conllu tokens to model tokens
-            token_mapping = {}  # conllu_idx -> model_token_idx
-            final_model_token_mask = torch.zeros(len(model_tokens_sent), dtype=torch.bool)
-            current_word_idx = 0
+            conllu_to_model_token_mapping = {}  # conllu_idx -> model_token_idx
             current_token_start = 1  # Skip BOS token
-            current_word = sent.tokens[current_word_idx]
 
-            for model_token_idx in range(1, len(model_tokens_sent)):
-                current_span = ''.join(model_tokens_sent[current_token_start:model_token_idx + 1]).strip()
-                if current_span == current_word:
-                    final_model_token_mask[model_token_idx] = True
-                    token_mapping[current_word_idx] = current_word_idx + 1
-                    current_word_idx += 1
+            # Filter out multi-word tokens (e.g. "2-3") and get valid token indices
+            for i, (token_id, word) in enumerate(zip(sent.ids, sent.tokens)):
+                if not isinstance(token_id, int) and '-' in token_id:
+                    continue
 
-                    if current_word_idx < len(sent.tokens):
-                        current_word = sent.tokens[current_word_idx]
+                # Find this word in model tokens starting from current_token_start
+                for model_token_idx in range(current_token_start, len(model_tokens_sent)):
+                    span = ''.join(model_tokens_sent[current_token_start:model_token_idx + 1]).strip()
+                    if word in span or any([x in span for x in ["'t", "'d", "'ll", "'re", "'ve"]]):
+                        conllu_to_model_token_mapping[i] = model_token_idx
                         current_token_start = model_token_idx + 1
+                        break
 
-            # Create mask based on train_toks
-            final_model_token_masks.append(final_model_token_mask)
+            # For tail mode, use mapped indices directly
+            final_model_token_masks.append(list(conllu_to_model_token_mapping.values()))
 
             # Add validation info
-            if sent_idx < 10 and do_print:
+            if sent_idx < 5 and do_print:
                 validation_info = {
                     'original_sentence': sent.text,
                     'model_tokens': model_tokens_sent,
-                    'selected_tokens': [
-                        (i, tok) for i, tok in enumerate(model_tokens_sent)
-                        if final_model_token_mask[i]
+                    'conllu_tokens': [
+                        f"{id_}:{tok}" for id_, tok in zip(sent.ids, sent.tokens)
                     ],
+                    'mapped_tokens': {
+                        f"{sent.ids[i]}:{sent.tokens[i]}": model_tokens_sent[model_idx]
+                        for i, model_idx in conllu_to_model_token_mapping.items()
+                    },
                     'train_toks': train_toks
                 }
                 validation_examples.append(validation_info)
@@ -87,9 +84,9 @@ class UDTransformer:
                 print(f"\nExample {idx + 1}:")
                 print(f"Original sentence: {example['original_sentence']}")
                 print(f"Training mode: {example['train_toks']}")
-                print("Selected tokens:")
-                for i, tok in example['selected_tokens']:
-                    print(f"  Position {i}: '{tok}'")
+                print("Token mappings:")
+                for conllu_tok, model_tok in example['mapped_tokens'].items():
+                    print(f"  CoNLL-U {conllu_tok} -> Model token '{model_tok}'")
                 print("-" * 80)
 
         return final_model_token_masks
@@ -109,7 +106,7 @@ class UDTransformer:
         """
 
         # Get encodings for all sentences
-        token_masks = self.get_token_masks(batch["sentences"], train_toks=train_toks, do_print=True)
+        token_masks = self.get_token_masks(batch["sentences"], train_toks=train_toks)
 
         # Run model with cache, but only store the layer we want
         with torch.no_grad():
@@ -133,6 +130,7 @@ class UDTransformer:
         # the way "labels" is unpacked is decided in collate_fn and is different for head and tail modes
         for i_sent, token_mask in enumerate(token_masks):
             # each token mask should be an integer tensor of size [num_tokens]
-            trimmed_padded_states[i_sent, :token_mask.sum()] = states[i_sent, :token_mask.size(0)][token_mask]
+            # trimmed_padded_states[i_sent, :token_mask.sum()] = states[i_sent, :token_mask.size(0)][token_mask]  # if boolean
+            trimmed_padded_states[i_sent, :len(token_mask)] = states[i_sent][torch.tensor(token_mask, dtype=torch.int)]  # if integer
 
         return trimmed_padded_states
