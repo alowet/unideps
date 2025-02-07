@@ -6,10 +6,10 @@
 #SBATCH --time=8:00:00
 #SBATCH --partition=gpu_test
 #SBATCH --gres=gpu:1
-#SBATCH -N=1
-#SBATCH -n=1
-#SBATCH -c=2
-#SBATCH --mem=32G
+#SBATCH -N 1
+#SBATCH -n 1
+#SBATCH -c 2
+#SBATCH --mem 32G
 
 module load python/3.10.9-fasrc01
 module load cuda/12.4

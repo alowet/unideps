@@ -21,7 +21,6 @@ device_sae = device_model
 
 # %%
 train_toks = "tail"
-max_layer =
 model_path = f"data/probes/{train_toks}.pkl"
 
 
