@@ -2,6 +2,7 @@
 import importlib
 import os
 import pickle
+from datetime import datetime
 
 import torch
 from analyze_sae import main as analyze_sae_main
@@ -57,8 +58,8 @@ model = UDTransformer(model_name="gemma-2-2b", device=device_model)
 # comment this block out if you just want to load probes
 
 probes = {}
-# for layer in range(model.model.cfg.n_layers):
-for layer in range(7):
+for layer in range(model.model.cfg.n_layers):
+# for layer in range(7):
     probe = train_probe(
         model,
         train_loader,
@@ -66,6 +67,7 @@ for layer in range(7):
         device_model,
         layer=layer,
         train_toks=train_toks,
+        run_group=datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     )
     probes[layer] = probe.cpu()
     del probe
@@ -73,9 +75,9 @@ for layer in range(7):
 
 # %%
 # comment the next line out if you want to overwrite existing probes
-if not os.path.exists(model_path):
-    with open(model_path, "wb") as f:
-        pickle.dump(probes, f)
+# if not os.path.exists(model_path):
+with open(model_path, "wb") as f:
+    pickle.dump(probes, f)
 
 # %%
 # for speed, select subset of layers

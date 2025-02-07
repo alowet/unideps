@@ -84,7 +84,8 @@ def train_probe(
     learning_rate: float = 1e-3,
     num_epochs: int = 10,
     train_toks: str = "tail",
-    run_name: Optional[str] = None
+    run_name: Optional[str] = None,
+    run_group: Optional[str] = None
 ) -> DependencyProbe:
     """Train dependency probe."""
 
@@ -93,6 +94,7 @@ def train_probe(
     # Initialize wandb
     wandb.init(
         project="dependency-probing",
+        group=run_group,
         name=run_name or f"layer_{layer}_probe",
         config={
             "layer": layer,
@@ -109,7 +111,7 @@ def train_probe(
     num_relations = len(DependencyTask.dependency_table())
     probe = DependencyProbe(hidden_dim, num_relations).to(device)
     optimizer = torch.optim.Adam(probe.parameters(), lr=learning_rate)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=0)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=1)
     criterion = nn.BCEWithLogitsLoss(reduction='mean')
 
     # Track best model
