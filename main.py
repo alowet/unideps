@@ -20,112 +20,133 @@ device_model = torch.device("cuda") if torch.cuda.is_available() else torch.devi
 device_sae = device_model
 
 # %%
-train_toks = "tail"
-model_path = f"data/probes/{train_toks}.pkl"
+# train_toks = "last"
+for train_toks in ["last", "head"]:
+    model_path = f"data/probes/{train_toks}.pkl"
+    start_time = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    print("Run group:", start_time)
 
+    # %% Load data
+    train_data = UDDataset("data/UD_English-EWT/en_ewt-ud-train.conllu", max_sentences=1024)
+    dev_data = UDDataset("data/UD_English-EWT/en_ewt-ud-dev.conllu", max_sentences=1024)
 
-# %% Load data
-train_data = UDDataset("data/UD_English-EWT/en_ewt-ud-train.conllu", max_sentences=1024)
-dev_data = UDDataset("data/UD_English-EWT/en_ewt-ud-dev.conllu", max_sentences=1024)
-
-# %%
-train_loader = DataLoader(
-    train_data,
-    batch_size=128,
-    shuffle=True,
-    collate_fn=lambda x: collate_fn(x, train_toks=train_toks)
-)
-dev_loader = DataLoader(
-    dev_data,
-    batch_size=128,
-    collate_fn=lambda x: collate_fn(x, train_toks=train_toks)
-)
-
-# %%
-# Initialize model
-model = UDTransformer(model_name="gemma-2-2b", device=device_model)
-
-
-# %%
-# # Load already trained probes
-# with open(model_path, "rb") as f:
-#     probes = pickle.load(f)
-
-
-#  %%
-# Train probes for different layers
-# Note this is inefficient in that it re-runs the model (one forward pass per layer), though it stops at layer+1 each time
-# comment this block out if you just want to load probes
-
-probes = {}
-for layer in range(model.model.cfg.n_layers):
-# for layer in range(1):
-    probe = train_probe(
-        model,
-        train_loader,
-        dev_loader,
-        device_model,
-        layer=layer,
-        train_toks=train_toks,
-        run_group=datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    # %%
+    train_loader = DataLoader(
+        train_data,
+        batch_size=128,
+        shuffle=True,
+        collate_fn=lambda x: collate_fn(x)
     )
-    probes[layer] = probe.cpu()
-    del probe
-    empty_cache()
+    dev_loader = DataLoader(
+        dev_data,
+        batch_size=128,
+        collate_fn=lambda x: collate_fn(x)
+    )
 
-# %%
-# comment the next line out if you want to overwrite existing probes
-# if not os.path.exists(model_path):
-with open(model_path, "wb") as f:
-    pickle.dump(probes, f)
+    # %%
+    # Initialize model
+    model = UDTransformer(model_name="gemma-2-2b", device=device_model)
 
-# %%
-# for speed, select subset of layers
-# probes = {k: v for k, v in probes.items() if k < 7}
 
-# %%
-# import analyze_sae
-# importlib.reload(analyze_sae)
-# from analyze_sae import main as analyze_sae_main
+    # %%
+    # # Load already trained probes
+    # with open(model_path, "rb") as f:
+    #     probes = pickle.load(f)
 
-analyze_sae_main(
-    probes,
-    train_toks=train_toks,
-    device_sae=device_sae
-)
 
-# %%
-# A feature that really jumps out here is Layer 1: Feature 7634, which has a cosine similarity of 0.387 with the conj relation
-# Inspect this feature
+    #  %%
+    # Train probes for different layers
+    # Note this is inefficient in that it re-runs the model (one forward pass per layer), though it stops at layer+1 each time
+    # comment this block out if you just want to load probes
+
+    probes = {}
+    for layer in range(model.model.cfg.n_layers):
+    # for layer in range(1):
+        probe = train_probe(
+            model,
+            train_loader,
+            dev_loader,
+            device_model,
+            layer=layer,
+            train_toks=train_toks,
+            run_group=start_time
+        )
+        probes[layer] = probe.cpu()
+        del probe
+        empty_cache()
+
+    # %%
+    # comment the next line out if you want to overwrite existing probes
+    # if not os.path.exists(model_path):
+    #     with open(model_path, "wb") as f:
+    #         pickle.dump(probes, f)
+
+    # %%
+    # for speed, select subset of layers
+    # probes = {k: v for k, v in probes.items() if k < 7}
+
+    # %% Evaluate
+    # import evaluate
+    # importlib.reload(evaluate)
+    # from evaluate import main as evaluate_main
+
+    test_data = UDDataset("data/UD_English-EWT/en_ewt-ud-test.conllu", max_sentences=1024)
+    test_loader = DataLoader(
+        test_data,
+        batch_size=128,
+        collate_fn=collate_fn
+    )
+
+    evaluate_main(
+        test_loader,
+        probes,
+        model,
+        train_toks=train_toks,
+        device=device_model
+        )
+
+# # %%
+# # import analyze_sae
+# # importlib.reload(analyze_sae)
+# # from analyze_sae import main as analyze_sae_main
+
+# analyze_sae_main(
+#     probes,
+#     train_toks=train_toks,
+#     device_sae=device_sae
+# )
+
+# # %%
+# # A feature that really jumps out here is Layer 1: Feature 7634, which has a cosine similarity of 0.387 with the conj relation
+# # Inspect this feature
 # from analyze_sae import display_dashboard
 
+# # display_dashboard(
+# #     sae_release="gemma-scope-2b-pt-res-canonical",
+# #     sae_id="layer_1/width_16k/canonical",
+# #     latent_idx=7634,
+# #     width=800,
+# #     height=600
+# # )
+
+# # Here's one with high cosine sim to the obj relation (layer 3 latent idx 1634: cosine sim 0.243)
 # display_dashboard(
 #     sae_release="gemma-scope-2b-pt-res-canonical",
-#     sae_id="layer_1/width_16k/canonical",
-#     latent_idx=7634,
+#     sae_id="layer_3/width_16k/canonical",
+#     latent_idx=1634,
 #     width=800,
 #     height=600
 # )
 
-# %% Evaluate
-# import evaluate
-# importlib.reload(evaluate)
-# from evaluate import main as evaluate_main
-
-test_data = UDDataset("data/UD_English-EWT/en_ewt-ud-test.conllu", max_sentences=1024)
-test_loader = DataLoader(
-    test_data,
-    batch_size=128,
-    collate_fn=collate_fn
-)
-
-evaluate_main(
-    test_loader,
-    probes,
-    model,
-    train_toks=train_toks,
-    device=device_model
-    )
+# # And to the nmod relation (layer 3 latent idx 10933: 0.189)
+# display_dashboard(
+#     sae_release="gemma-scope-2b-pt-res-canonical",
+#     sae_id="layer_3/width_16k/canonical",
+#     latent_idx=10933,
+#     width=800,
+#     height=600
+# )
 
 
-# %%
+
+# # %%

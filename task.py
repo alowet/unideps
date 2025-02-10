@@ -89,7 +89,7 @@ class DependencyTask:
 
         # Initialize tensor of zeros with actual sequence length
         relations = torch.zeros((seq_length, num_relations), dtype=torch.float)
-        head_idxs = torch.ones((seq_length, num_relations), dtype=torch.int) * torch.nan
+        head_idxs = torch.ones((seq_length, num_relations), dtype=torch.int) * -1  # -1 will be masked out later
         # For each word position
         for i, deps in enumerate(sentence.deps):
             if deps is not None:

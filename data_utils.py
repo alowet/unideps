@@ -4,12 +4,11 @@ import torch
 from task import DependencyTask
 
 
-def collate_fn(batch, train_toks: str = "tail"):
+def collate_fn(batch):
     """Collate batch of examples into padded tensors.
 
     Args:
         batch: List of UDSentence objects
-        train_toks: "tail" or "head" to indicate which tokens to use as the target for training
     Returns:
         Dictionary containing:
             - relation_mask: torch.Tensor - mask for relations [batch_size, max_tokens]
@@ -27,29 +26,29 @@ def collate_fn(batch, train_toks: str = "tail"):
     # Create label tensors with padding
     tensors_info = {
         'relations': {'max_len': max_tokens, 'tensors': []},
-        'head_nums': {'max_len': max_heads, 'tensors': []}
+        'head_idxs': {'max_len': max_heads, 'tensors': []}
     }
     masks = {
         'relations': torch.ones((len(batch), max_tokens), dtype=torch.bool),
-        'head_nums': torch.ones((len(batch), max_heads), dtype=torch.bool)
+        'head_idxs': torch.ones((len(batch), max_heads), dtype=torch.bool)
     }
 
     for i, sent in enumerate(batch):
-        relation, head_num = DependencyTask.relations(sent)
-        for name, tensor in [('relations', relation), ('head_nums', head_num)]:
+        relation, head_idx = DependencyTask.relations(sent)
+        for name, tensor, pad_val in [('relations', relation, 0), ('head_idxs', head_idx, -1)]:
             info = tensors_info[name]
             pad_len = info['max_len'] - len(tensor)
             if pad_len > 0:
-                padding = torch.zeros((pad_len, tensor.size(1)), dtype=tensor.dtype)
+                padding = torch.ones((pad_len, tensor.size(1)), dtype=tensor.dtype) * pad_val
                 tensor = torch.cat([tensor, padding], dim=0)
                 masks[name][i, len(tensor)-pad_len:] = False
             info['tensors'].append(tensor)
 
     return {
         "relation_mask": masks['relations'],
-        "head_mask": masks['head_nums'],
+        "head_mask": masks['head_idxs'],
         "relations": torch.stack(tensors_info['relations']['tensors']),
-        "head_nums": torch.stack(tensors_info['head_nums']['tensors']),
+        "head_idxs": torch.stack(tensors_info['head_idxs']['tensors']),
         "max_tokens": max_tokens,
         "max_heads": max_heads,
         "sentences": batch

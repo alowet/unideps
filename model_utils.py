@@ -25,7 +25,7 @@ class UDTransformer:
         print(f"Loading {model_name} on device: {device}")
         self.model = HookedTransformer.from_pretrained(model_name, device=device)
 
-    def get_token_masks(self, sentences: List[UDSentence], do_print: bool = False, train_toks: str = "tail"):
+    def get_token_masks(self, sentences: List[UDSentence], do_print: bool = False):
         """Get token masks for sentences.
 
         Args:
@@ -73,8 +73,7 @@ class UDTransformer:
                     'mapped_tokens': {
                         f"{sent.ids[i]}:{sent.tokens[i]}": model_tokens_sent[model_idx]
                         for i, model_idx in conllu_to_model_token_mapping.items()
-                    },
-                    'train_toks': train_toks
+                    }
                 }
                 validation_examples.append(validation_info)
 
@@ -83,7 +82,6 @@ class UDTransformer:
             for idx, example in enumerate(validation_examples):
                 print(f"\nExample {idx + 1}:")
                 print(f"Original sentence: {example['original_sentence']}")
-                print(f"Training mode: {example['train_toks']}")
                 print("Token mappings:")
                 for conllu_tok, model_tok in example['mapped_tokens'].items():
                     print(f"  CoNLL-U {conllu_tok} -> Model token '{model_tok}'")
@@ -106,7 +104,7 @@ class UDTransformer:
         """
 
         # Get encodings for all sentences
-        token_masks = self.get_token_masks(batch["sentences"], train_toks=train_toks)
+        token_masks = self.get_token_masks(batch["sentences"])
 
         # Run model with cache, but only store the layer we want
         with torch.no_grad():
@@ -127,10 +125,10 @@ class UDTransformer:
                 device=states.device
             )
 
-        # the way "labels" is unpacked is decided in collate_fn and is different for head and tail modes
         for i_sent, token_mask in enumerate(token_masks):
             # each token mask should be an integer tensor of size [num_tokens]
             # trimmed_padded_states[i_sent, :token_mask.sum()] = states[i_sent, :token_mask.size(0)][token_mask]  # if boolean
             trimmed_padded_states[i_sent, :len(token_mask)] = states[i_sent][torch.tensor(token_mask, dtype=torch.int)]  # if integer
 
+        # shape: [batch, max_tokens, hidden_dim], containing the activations for each token in the batch
         return trimmed_padded_states

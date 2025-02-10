@@ -48,30 +48,60 @@ def compute_loss(probe: DependencyProbe,
     """
     # Get activations and compute scores
     activations = model.get_activations(batch, layer_idx=layer, train_toks=train_toks)  # size [batch, max_len, hidden_dim]
-    scores = probe(activations)  # size [batch, max_len, num_relations]
+    scores = probe(activations)  # size [batch, max_len, num_relations], for each token, get a predicted relation logit
+    preds = torch.sigmoid(scores) > 0.5  # sigmoid since we're using BCE loss
 
     # Get labels and mask
     relations = batch["relations"].to(device)  # size [batch, max_tokens, num_relations]
-    # integer tensor, where each int is the index of the head token for the relation
-    head_nums = batch["head_nums"].to(device)  # size [batch, max_heads, num_relations]
-
     relation_mask = batch["relation_mask"].to(device)  # size [batch, max_tokens]
-    head_mask = batch["head_mask"].to(device)  # size [batch, max_heads]
 
-    if train_toks == "head":
-        raise NotImplementedError("Head token probing not implemented")
+    scores_masked = scores[relation_mask]  # shape [relation_mask.sum(), num_relations], scores for all relations that exist at each token position in the batch
+    preds_masked = preds[relation_mask]  # shape [relation_mask.sum(), num_relations], predictions for all relations that exist at each token position in the batch
+
+    if train_toks == "tail":
+        relations_masked = relations[relation_mask]  # shape [relation_mask.sum(), num_relations]
     else:
-        relations_masked = relations[relation_mask]
+        if train_toks == "head":
+            # integer tensor, where each int is the index of the head token for the relation
+            head_idxs = batch["head_idxs"].to(device)  # size [batch, max_heads, num_relations]
+
+            # Get dimensions
+            batch_size, max_heads, num_relations = head_idxs.shape
+
+            # Create a binary tensor of same shape as relations [batch, max_tokens, num_relations]
+            relations_head = torch.zeros_like(relations)
+
+            # Create batch and relation indices for indexing
+            batch_idx = torch.arange(batch_size, device=device).view(-1, 1, 1).expand_as(head_idxs)
+            rel_idx = torch.arange(num_relations, device=device).view(1, 1, -1).expand_as(head_idxs)
+
+            # Mask out padded/invalid indices
+            valid_mask = head_idxs >= 0
+
+            # Set 1s at head positions for each relation
+            relations_head[
+                batch_idx[valid_mask],
+                head_idxs[valid_mask].long(),
+                rel_idx[valid_mask]
+            ] = 1.0
+
+            # Apply relation mask to get final tensor
+            relations_masked = relations_head[relation_mask]  # shape [relation_mask.sum(), num_relations]
+
+        elif train_toks == "last":
+            # try to decode all relations present in the batch based only on the last token; ignore all the other tokens in the sentence
+            seq_lens = relation_mask.sum(dim=1)  # shape [batch]
+            relations_masked = torch.any(relations, dim=1).float()  # shape [batch, num_relations]
+            # Get scores/preds at last token position for each sequence
+            batch_idx = torch.arange(len(seq_lens), device=device)
+            scores_masked = scores[batch_idx, seq_lens - 1]  # shape [batch, num_relations]
+            preds_masked = preds[batch_idx, seq_lens - 1]  # shape [batch, num_relations]
 
     if return_type == "loss":
         # Compute masked loss
-        scores_masked = scores[relation_mask]
         loss = criterion(scores_masked, relations_masked)
         return loss, scores
-
     else:  # return_type == "preds":
-        preds = torch.sigmoid(scores) > 0.5  # sigmoid since we're using BCE loss
-        preds_masked = preds[relation_mask]
         return preds_masked, relations_masked
 
 
