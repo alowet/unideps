@@ -6,10 +6,12 @@ from datetime import datetime
 
 import torch
 from analyze_sae import main as analyze_sae_main
+from darkmatter import main as dm_main
 from data_utils import collate_fn
 from evaluate import main as evaluate_main
 from load_data import UDDataset
 from model_utils import UDTransformer
+from nonsparse import analyze_sparsity
 from probing import train_probe
 from torch.cuda import empty_cache
 from torch.utils.data import DataLoader
@@ -20,95 +22,128 @@ device_model = torch.device("cuda") if torch.cuda.is_available() else torch.devi
 device_sae = device_model
 
 # %%
-# train_toks = "last"
-for train_toks in ["last", "head"]:
-    model_path = f"data/probes/{train_toks}.pkl"
-    start_time = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    print("Run group:", start_time)
+train_toks = "tail"
+# for train_toks in ["last","head"]:
+model_path = f"data/probes/{train_toks}.pkl"
+start_time = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+print("Run group:", start_time)
 
-    # %% Load data
-    train_data = UDDataset("data/UD_English-EWT/en_ewt-ud-train.conllu", max_sentences=1024)
-    dev_data = UDDataset("data/UD_English-EWT/en_ewt-ud-dev.conllu", max_sentences=1024)
+# %% Load data
+train_data = UDDataset("data/UD_English-EWT/en_ewt-ud-train.conllu", max_sentences=1024)
+dev_data = UDDataset("data/UD_English-EWT/en_ewt-ud-dev.conllu", max_sentences=1024)
 
-    # %%
-    train_loader = DataLoader(
-        train_data,
-        batch_size=128,
-        shuffle=True,
-        collate_fn=lambda x: collate_fn(x)
-    )
-    dev_loader = DataLoader(
-        dev_data,
-        batch_size=128,
-        collate_fn=lambda x: collate_fn(x)
-    )
+# %%
+train_loader = DataLoader(
+    train_data,
+    batch_size=128,
+    shuffle=True,
+    collate_fn=lambda x: collate_fn(x)
+)
+dev_loader = DataLoader(
+    dev_data,
+    batch_size=128,
+    collate_fn=lambda x: collate_fn(x)
+)
 
-    # %%
-    # Initialize model
-    model = UDTransformer(model_name="gemma-2-2b", device=device_model)
-
-
-    # %%
-    # # Load already trained probes
-    # with open(model_path, "rb") as f:
-    #     probes = pickle.load(f)
+# %%
+# Initialize model
+model = UDTransformer(model_name="gemma-2-2b", device=device_model)
 
 
-    #  %%
-    # Train probes for different layers
-    # Note this is inefficient in that it re-runs the model (one forward pass per layer), though it stops at layer+1 each time
-    # comment this block out if you just want to load probes
+# %%
+# Load already trained probes
+with open(model_path, "rb") as f:
+    probes = pickle.load(f)
 
-    probes = {}
-    for layer in range(model.model.cfg.n_layers):
-    # for layer in range(1):
-        probe = train_probe(
-            model,
-            train_loader,
-            dev_loader,
-            device_model,
-            layer=layer,
-            train_toks=train_toks,
-            run_group=start_time
-        )
-        probes[layer] = probe.cpu()
-        del probe
-        empty_cache()
 
-    # %%
-    # comment the next line out if you want to overwrite existing probes
-    # if not os.path.exists(model_path):
-    #     with open(model_path, "wb") as f:
-    #         pickle.dump(probes, f)
+#  %%
+# Train probes for different layers
+# Note this is inefficient in that it re-runs the model (one forward pass per layer), though it stops at layer+1 each time
+# comment this block out if you just want to load probes
 
-    # %%
-    # for speed, select subset of layers
-    # probes = {k: v for k, v in probes.items() if k < 7}
+# probes = {}
+# for layer in range(model.model.cfg.n_layers):
+# # for layer in range(1):
+#     probe = train_probe(
+#         model,
+#         train_loader,
+#         dev_loader,
+#         device_model,
+#         layer=layer,
+#         train_toks=train_toks,
+#         run_group=start_time
+#     )
+#     probes[layer] = probe.cpu()
+#     del probe
+#     empty_cache()
 
-    # %% Evaluate
-    # import evaluate
-    # importlib.reload(evaluate)
-    # from evaluate import main as evaluate_main
+# %%
+# comment the next line out if you want to overwrite existing probes
+# if not os.path.exists(model_path):
+#     with open(model_path, "wb") as f:
+#         pickle.dump(probes, f)
 
-    test_data = UDDataset("data/UD_English-EWT/en_ewt-ud-test.conllu", max_sentences=1024)
-    test_loader = DataLoader(
-        test_data,
-        batch_size=128,
-        collate_fn=collate_fn
-    )
+# %%
+# for speed, select subset of layers
+# probes = {k: v for k, v in probes.items() if k < 7}
 
-    evaluate_main(
-        test_loader,
-        probes,
-        model,
-        train_toks=train_toks,
-        device=device_model
-        )
+# %% Evaluate
+# import evaluate
+# importlib.reload(evaluate)
+# from evaluate import main as evaluate_main
 
-# # %%
-# # import analyze_sae
-# # importlib.reload(analyze_sae)
-# # from analyze_sae import main as analyze_sae_main
+# test_data = UDDataset("data/UD_English-EWT/en_ewt-ud-test.conllu", max_sentences=1024)
+# test_loader = DataLoader(
+#     test_data,
+#     batch_size=128,
+#     collate_fn=collate_fn
+# )
+
+# evaluate_main(
+#     test_loader,
+#     probes,
+#     model,
+#     train_toks=train_toks,
+#     device=device_model
+#     )
+# %%
+import nonsparse
+
+importlib.reload(nonsparse)
+from nonsparse import analyze_sparsity
+
+layer = 5
+width = 16
+save_path = f'figures/sparsity_layer_{layer}_width_{width}.png'
+
+analyze_sparsity(
+    model,
+    train_loader,
+    layer,
+    device_sae,
+    width,
+    save_path
+)
+# %%
+# # Following Engels et al., 2024, see how much SAE error is linearly predictable (a) based on the residual stream itself and (b) based on the universal dependencies at that position
+# import darkmatter
+
+# importlib.reload(darkmatter)
+# from darkmatter import main as dm_main
+
+# dm_main(
+#     model=model,
+#     train_loader=train_loader,
+#     dev_loader=dev_loader,
+#     device=device_sae,
+#     layer=5,
+#     sae_width=16
+# )
+
+# %%
+# import analyze_sae
+# importlib.reload(analyze_sae)
+# from analyze_sae import main as analyze_sae_main
 
 # analyze_sae_main(
 #     probes,
