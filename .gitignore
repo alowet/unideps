@@ -9,3 +9,4 @@ slurm/*
 *.jsonl
 *.csv
 *.txt
+*.safetensors
