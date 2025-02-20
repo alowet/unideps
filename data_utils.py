@@ -35,6 +35,7 @@ def collate_fn(batch):
 
     for i, sent in enumerate(batch):
         relation, head_idx = DependencyTask.relations(sent)
+        masks['relations'][i, (relation == -1).any(1).nonzero()[:, 0]] = False
         for name, tensor, pad_val in [('relations', relation, 0), ('head_idxs', head_idx, -1)]:
             info = tensors_info[name]
             pad_len = info['max_len'] - len(tensor)

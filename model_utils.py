@@ -1,12 +1,13 @@
+import os
 from typing import Dict, List, Optional, Tuple
 
 import torch
 from huggingface_hub import login
 from load_data import UDSentence
-from tqdm import tqdm
 
 # from transformers import AutoModelForCausalLM, AutoTokenizer
-from transformer_lens import HookedTransformer
+from sae_lens import HookedSAETransformer
+from tqdm import tqdm
 
 
 class UDTransformer:
@@ -18,12 +19,12 @@ class UDTransformer:
             device: Device to load the model on
         """
         # Read HuggingFace token
-        with open('/n/home06/alowet/.cache/huggingface/token', 'r') as f:
+        with open(os.path.join(os.environ["HF_HOME"], 'token'), 'r') as f:
             token = f.read()
         login(token)
 
         print(f"Loading {model_name} on device: {device}")
-        self.model = HookedTransformer.from_pretrained(model_name, device=device)
+        self.model = HookedSAETransformer.from_pretrained(model_name, device=device)
 
     def get_token_masks(self, sentences: List[UDSentence], do_print: bool = False):
         """Get token masks for sentences.

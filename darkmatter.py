@@ -168,9 +168,9 @@ def train_error_predictor(
         print(all_inputs.shape, all_vector_outputs.shape, all_norm_errors.shape)
 
         # compute sparsity of SAE activations and plot
-        all_latent_counts = all_latent_counts / all_n_tokens
-        plt.hist(all_latent_counts, bins=100)
-        plt.show()
+        # all_latent_counts = all_latent_counts / all_n_tokens
+        # plt.hist(all_latent_counts, bins=100)
+        # plt.show()
 
         if phase == "train":
             # Train linear regression
@@ -249,7 +249,7 @@ def main(
     sae = SAE.from_pretrained(sae_release, sae_id, device=str(device))[0]
 
     # Train predictors for both approaches
-    for input_type, output_type in [("resid_stream", "error"), ("dependencies", "error"), ("dependencies", "activations")]:
+    for input_type, output_type in [("dependencies", "activations"), ("resid_stream", "error"), ("dependencies", "error")]:
         print(f"\nTraining {input_type}-based predictor for {output_type}...")
         vector_regressor, norm_regressor = train_error_predictor(
             model=model,

@@ -78,10 +78,11 @@ class DependencyTask:
 
         Args:
             sentence: UDSentence object containing tokens and deps fields
-            train_toks: "tail" or "head" to indicate which tokens to use as the target for training
         Returns:
-            Tensor of shape (sequence_length, num_relations) where each row is a
-            multi-hot vector indicating which dependency relations apply to that word
+            relations: Tensor of shape (sequence_length, num_relations) where each row is a
+                multi-hot vector indicating which dependency relations apply to that word
+            head_idxs: Tensor of shape (sequence_length, num_relations) containing indices
+                of head tokens for each relation (-1 if no relation)
         """
         dep_table = DependencyTask.dependency_table()
         num_relations = len(dep_table)
@@ -90,22 +91,31 @@ class DependencyTask:
         # Initialize tensor of zeros with actual sequence length
         relations = torch.zeros((seq_length, num_relations), dtype=torch.float)
         head_idxs = torch.ones((seq_length, num_relations), dtype=torch.int) * -1  # -1 will be masked out later
-        # For each word position
-        for i, deps in enumerate(sentence.deps):
+
+        # For each word position (tail position)
+        for tail_pos, deps in enumerate(sentence.deps):
             if deps is not None:
                 # Set corresponding indices to 1 in the multi-hot vector
-                for rel, head_num in deps: # deps is already parsed
+                for rel, head_num in deps:
                     if rel not in dep_table:
                         if ':' in rel:
-                            # certain relations show specific entity, e.g. "nmod:of". Remove the last part (allowing for multiple preceding colons, potentially)
+                            # certain relations show specific entity, e.g. "nmod:of". Remove the last part
                             rel = rel.rsplit(':', 1)[0]
                         if rel == '_':
                             continue
+
                     if rel in dep_table:
-                        rel_idx = dep_table[rel]
-                        relations[i, rel_idx] = 1
+                        # Convert head_num to position index
                         if head_num != 0:
-                            head_idxs[i, rel_idx] = sentence.ids.index(head_num)
+                            head_pos = sentence.ids.index(head_num)
+                            rel_idx = dep_table[rel]
+                            # Only include dependency if tail comes after head
+                            if head_pos < tail_pos:
+                                relations[tail_pos, rel_idx] = 1
+                                head_idxs[tail_pos, rel_idx] = head_pos
+                            else:
+                                relations[tail_pos, rel_idx] = -1
+
                     else:
                         print(f"Relation {rel} not found in dependency table")
 

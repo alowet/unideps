@@ -14,6 +14,6 @@
 module load python/3.10.9-fasrc01
 module load cuda/12.4
 module load cudnn
-conda activate relcomp
+conda activate interp
 
 srun -N 1 -c $SLURM_CPUS_PER_TASK python main.py
