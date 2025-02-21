@@ -4,11 +4,12 @@ from typing import Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
-import wandb
 from model_utils import UDTransformer
 from task import DependencyTask
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+
+import wandb
 
 
 class DependencyProbe(nn.Module):
@@ -30,7 +31,8 @@ def compute_loss(probe: DependencyProbe,
                 device: torch.device,
                 train_toks: str = "tail",
                 criterion: nn.modules.loss._Loss = nn.BCEWithLogitsLoss,
-                return_type: str = "loss") -> Tuple[torch.Tensor, torch.Tensor]:
+                return_type: str = "loss",
+                frequent_deps: Optional[list] = None) -> Tuple[torch.Tensor, torch.Tensor]:
     """Compute loss for a single batch.
 
     Args:
@@ -42,6 +44,7 @@ def compute_loss(probe: DependencyProbe,
         device: Device to use
         train_toks: Whether to use head or tail of dependency, or some other token entirely (e.g. first or last)
         return_type: Whether to return loss (training/dev) or predictions (testing)
+        frequent_deps: Set of indices for dependency relations that appear frequently enough
     Returns:
         loss: The computed loss
         scores: The probe's predictions
@@ -55,11 +58,16 @@ def compute_loss(probe: DependencyProbe,
     relations = batch["relations"].to(device)  # size [batch, max_tokens, num_relations]
     relation_mask = batch["relation_mask"].to(device)  # size [batch, max_tokens]
 
-    scores_masked = scores[relation_mask]  # shape [relation_mask.sum(), num_relations], scores for all relations that exist at each token position in the batch
-    preds_masked = preds[relation_mask]  # shape [relation_mask.sum(), num_relations], predictions for all relations that exist at each token position in the batch
+    dep_table = DependencyTask.dependency_table()
+    dep_indices = [dep_table[dep] for dep in frequent_deps] if frequent_deps is not None else list(dep_table.values())
+
+    relations_notnan = ~(relations.isnan()[relation_mask][:, dep_indices].any(1))  # shape [relation_mask.sum(), num_relations]
+    scores_masked = scores[relation_mask][relations_notnan]  # shape [relation_mask.sum(), num_relations], scores for all relations that exist at each token position in the batch
+    preds_masked = preds[relation_mask][relations_notnan]  # shape [relation_mask.sum(), num_relations], predictions for all relations that exist at each token position in the batch
 
     if train_toks == "tail":
-        relations_masked = relations[relation_mask]  # shape [relation_mask.sum(), num_relations]
+        relations_masked = relations[relation_mask][:, dep_indices]  # shape [relation_mask.sum(), num_relations]
+        relations_masked = relations_masked[relations_notnan]
     else:
         if train_toks == "head":
             # integer tensor, where each int is the index of the head token for the relation
@@ -86,16 +94,20 @@ def compute_loss(probe: DependencyProbe,
             ] = 1.0
 
             # Apply relation mask to get final tensor
-            relations_masked = relations_head[relation_mask]  # shape [relation_mask.sum(), num_relations]
+            relations_masked = relations_head[relation_mask][:, dep_indices]  # shape [relation_mask.sum(), num_relations]
 
         elif train_toks == "last":
             # try to decode all relations present in the batch based only on the last token; ignore all the other tokens in the sentence
             seq_lens = relation_mask.sum(dim=1)  # shape [batch]
-            relations_masked = torch.any(relations, dim=1).float()  # shape [batch, num_relations]
+            relations_masked = torch.any(relations[relation_mask][:, dep_indices], dim=1).float()  # shape [batch, num_relations]
             # Get scores/preds at last token position for each sequence
             batch_idx = torch.arange(len(seq_lens), device=device)
             scores_masked = scores[batch_idx, seq_lens - 1]  # shape [batch, num_relations]
             preds_masked = preds[batch_idx, seq_lens - 1]  # shape [batch, num_relations]
+
+    # If no frequent dependencies in batch, return zero loss
+    if scores_masked.numel() == 0:
+        return torch.tensor(0.0, device=device), scores
 
     if return_type == "loss":
         # Compute masked loss
@@ -115,7 +127,8 @@ def train_probe(
     num_epochs: int = 10,
     train_toks: str = "tail",
     run_name: Optional[str] = None,
-    run_group: Optional[str] = None
+    run_group: Optional[str] = None,
+    frequent_deps: Optional[list] = None
 ) -> DependencyProbe:
     """Train dependency probe."""
 
@@ -138,7 +151,7 @@ def train_probe(
 
     # Initialize models and optimizer
     hidden_dim = model.model.cfg.d_model
-    num_relations = len(DependencyTask.dependency_table())
+    num_relations = len(frequent_deps) if frequent_deps is not None else len(DependencyTask.dependency_table())
     probe = DependencyProbe(hidden_dim, num_relations).to(device)
     optimizer = torch.optim.Adam(probe.parameters(), lr=learning_rate)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=1)
@@ -161,7 +174,7 @@ def train_probe(
             optimizer.zero_grad()
 
             # Compute loss and update
-            loss, _ = compute_loss(probe, model, batch, layer, device, train_toks=train_toks, criterion=criterion, return_type="loss")
+            loss, _ = compute_loss(probe, model, batch, layer, device, train_toks=train_toks, criterion=criterion, return_type="loss", frequent_deps=frequent_deps)
             loss.backward()
             optimizer.step()
 
@@ -186,7 +199,7 @@ def train_probe(
 
         with torch.no_grad():
             for batch in tqdm(dev_loader, desc='Evaluating'):
-                loss, _ = compute_loss(probe, model, batch, layer, device, train_toks=train_toks, criterion=criterion, return_type="loss")
+                loss, _ = compute_loss(probe, model, batch, layer, device, train_toks=train_toks, criterion=criterion, return_type="loss", frequent_deps=frequent_deps)
                 total_loss += loss.item()
                 num_batches += 1
 

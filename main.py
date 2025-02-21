@@ -39,14 +39,6 @@ from utils import load_sae_from_wandb
 device_model = torch.device("cuda") if torch.cuda.is_available() else torch.device("mps")
 device_sae = device_model
 
-# %%
-train_toks = "tail"
-deps = DependencyTask.dependency_table()
-
-# for train_toks in ["last","head"]:
-model_path = f"data/probes/{train_toks}_tail_trail.pkl"
-start_time = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-print("Run group:", start_time)
 
 # %% Load data
 train_data = UDDataset("data/UD_English-EWT/en_ewt-ud-train.conllu", max_sentences=1024)
@@ -69,6 +61,32 @@ dev_loader = DataLoader(
 # Initialize model
 ud_model = UDTransformer(model_name="gemma-2-2b", device=device_model)
 
+# %%
+train_toks = "tail"
+which_pos = "trail"
+min_occurrences = 50
+deps = DependencyTask.dependency_table()
+dep_counts = DependencyTask.count_dependencies(train_data)
+
+# for train_toks in ["last","head"]:
+model_path = f"data/probes/{train_toks}_{which_pos}_min_{min_occurrences}.pkl"
+start_time = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+print("Run group:", start_time)
+
+
+#  %%
+# Count dependencies and filter for frequent ones
+
+frequent_deps = {
+    rel: count for rel, count in dep_counts.items()
+    if count >= min_occurrences
+}
+
+print(f"Found {len(frequent_deps)} dependency relations with >= {min_occurrences} occurrences:")
+for rel, count in sorted(dep_counts.items(), key=lambda x: x[1], reverse=True):
+    if count >= min_occurrences:
+        print(f"{rel}: {count}")
+
 
 # %%
 # Load already trained probes
@@ -76,14 +94,18 @@ ud_model = UDTransformer(model_name="gemma-2-2b", device=device_model)
 #     probes = pickle.load(f)
 
 
-#  %%
+# %%
 # Train probes for different layers
 # Note this is inefficient in that it re-runs the model (one forward pass per layer), though it stops at layer+1 each time
 # comment this block out if you just want to load probes
+import probing
+
+importlib.reload(probing)
+from probing import train_probe
 
 probes = {}
 for layer in range(ud_model.model.cfg.n_layers):
-# for layer in range(1):
+    # Pass frequent_deps to compute_loss during training
     probe = train_probe(
         ud_model,
         train_loader,
@@ -91,7 +113,8 @@ for layer in range(ud_model.model.cfg.n_layers):
         device_model,
         layer=layer,
         train_toks=train_toks,
-        run_group=start_time
+        run_group=start_time,
+        frequent_deps=list(frequent_deps.keys())
     )
     probes[layer] = probe.cpu()
     del probe
@@ -108,6 +131,11 @@ if not os.path.exists(model_path):
 # probes = {k: v for k, v in probes.items() if k < 7}
 
 # %% Evaluate
+import evaluate
+
+importlib.reload(evaluate)
+from evaluate import main as evaluate_main
+
 test_data = UDDataset("data/UD_English-EWT/en_ewt-ud-test.conllu", max_sentences=1024)
 test_loader = DataLoader(
     test_data,
@@ -120,8 +148,9 @@ evaluate_main(
     probes,
     ud_model,
     train_toks=train_toks,
-    device=device_model
-    )
+    device=device_model,
+    frequent_deps=list(frequent_deps.keys())
+)
 
 # %%
 layer = 5  # pre layer 5 for probes and SAE
@@ -346,30 +375,28 @@ for start in range(0, len(deps), incr):
 
 # %%
 # Following Engels et al., 2024, see how much SAE error is linearly predictable (a) based on the residual stream itself and (b) based on the universal dependencies at that position
-import darkmatter
-
-importlib.reload(darkmatter)
-from darkmatter import main as dm_main
-
-dm_main(
-    model=ud_model,
-    train_loader=train_loader,
-    dev_loader=dev_loader,
-    device=device_sae,
-    layer=5,
-    sae_width=16
-)
+# dm_main(
+#     model=ud_model,
+#     train_loader=train_loader,
+#     dev_loader=dev_loader,
+#     device=device_sae,
+#     layer=5,
+#     sae_width=16
+# )
 
 # %%
-# import analyze_sae
-# importlib.reload(analyze_sae)
-# from analyze_sae import main as analyze_sae_main
+import analyze_sae
 
-# analyze_sae_main(
-#     probes,
-#     train_toks=train_toks,
-#     device_sae=device_sae
-# )
+importlib.reload(analyze_sae)
+from analyze_sae import main as analyze_sae_main
+
+# TODO: FIX THIS to use frequent_deps
+analyze_sae_main(
+    probes,
+    train_toks=train_toks,
+    device_sae=device_sae,
+    frequent_deps=list(frequent_deps.keys())
+)
 
 # # %%
 # # A feature that really jumps out here is Layer 1: Feature 7634, which has a cosine similarity of 0.387 with the conj relation
@@ -405,3 +432,5 @@ dm_main(
 
 
 # # %%
+
+# %%

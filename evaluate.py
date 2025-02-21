@@ -22,6 +22,7 @@ def evaluate_probe(
     device: torch.device,
     layer: int,
     train_toks: str = "tail",
+    frequent_deps: Optional[list] = None,
 ) -> Dict[str, float]:
     """Evaluate probe on test set.
 
@@ -32,6 +33,7 @@ def evaluate_probe(
         layer: Layer to evaluate
         train_toks: Whether to use head or tail of dependency
         device: Device to use for computation
+        frequent_deps: List of dependency types to evaluate on
 
     Returns:
         Dictionary containing metrics:
@@ -54,7 +56,12 @@ def evaluate_probe(
     with torch.no_grad():
         for batch in tqdm(test_loader, desc="Evaluating"):
             # Get model outputs
-            preds_masked, relations_masked = compute_loss(probe, model, batch, layer, device, train_toks, return_type="preds")
+            preds_masked, relations_masked = compute_loss(
+                probe, model, batch, layer, device,
+                train_toks=train_toks,
+                return_type="preds",
+                frequent_deps=frequent_deps
+            )
 
             all_preds.append(preds_masked.cpu())
             all_relations.append(relations_masked.cpu())
@@ -74,22 +81,29 @@ def evaluate_probe(
     metrics["macro_f1"] = f1_score(
         all_relations.argmax(axis=1),
         all_preds.argmax(axis=1),
-        average='macro'  # Treats all classes equally regardless of support
+        average='macro'
     )
     metrics["weighted_f1"] = f1_score(
         all_relations.argmax(axis=1),
         all_preds.argmax(axis=1),
-        average='weighted'  # Weights by class support
+        average='weighted'
     )
 
     # Per-class metrics
     per_class_acc = {}
     per_class_f1 = {}
-    for i in range(all_relations.shape[1]):
-        acc = balanced_accuracy_score(all_relations[:, i], all_preds[:, i])
-        f1 = f1_score(all_relations[:, i], all_preds[:, i])
-        per_class_acc[idx_to_dep[i]] = acc
-        per_class_f1[idx_to_dep[i]] = f1
+
+    # If using frequent_deps, only evaluate those dependencies
+    eval_deps = frequent_deps if frequent_deps is not None else dep_to_idx.keys()
+
+    for dep in eval_deps:
+        idx = dep_to_idx[dep]
+        if idx < all_relations.shape[1]:  # Check if this dependency was included in probe
+            acc = balanced_accuracy_score(all_relations[:, idx], all_preds[:, idx])
+            f1 = f1_score(all_relations[:, idx], all_preds[:, idx])
+            per_class_acc[dep] = acc
+            per_class_f1[dep] = f1
+
     metrics["per_class_accuracy"] = per_class_acc
     metrics["per_class_f1"] = per_class_f1
 
@@ -175,21 +189,31 @@ def plot_layer_results(results: Dict[int, Dict[str, float]], baseline: Dict[str,
     plt.show()
 
 
-def compute_majority_baseline(test_loader: DataLoader) -> Dict[str, float]:
+def compute_majority_baseline(test_loader: DataLoader, frequent_deps: Optional[list] = None) -> Dict[str, float]:
     """Compute baseline metrics assuming we always predict the most frequent class.
 
     Args:
         test_loader: DataLoader for test set
+        frequent_deps: List of dependency types to evaluate on
 
     Returns:
         Dictionary containing baseline metrics
     """
+    # Get mapping of indices to relation names
+    dep_to_idx = DependencyTask.dependency_table()
+
     # Collect all relations
     all_relations = []
     for batch in test_loader:
         relations = batch["relations"]
         relation_mask = batch["relation_mask"]
         relations_masked = relations[relation_mask]
+
+        # If using frequent_deps, only keep those columns
+        if frequent_deps is not None:
+            dep_indices = [dep_to_idx[dep] for dep in frequent_deps]
+            relations_masked = relations_masked[:, dep_indices]
+
         all_relations.append(relations_masked)
 
     # Concatenate all relations
@@ -229,7 +253,8 @@ def main(
     probes: Dict[int, DependencyProbe],
     model: UDTransformer,
     train_toks: str = "tail",
-    device: Optional[torch.device] = None
+    device: Optional[torch.device] = None,
+    frequent_deps: Optional[list] = None
 ):
     """Main evaluation function."""
     if device is None:
@@ -239,7 +264,7 @@ def main(
 
     # First compute baseline
     print("\nComputing majority class baseline...")
-    baseline = compute_majority_baseline(test_loader)
+    baseline = compute_majority_baseline(test_loader, frequent_deps)
     print(f"Majority class baseline:")
     print(f"  Macro F1: {baseline['macro_f1']:.3f}")
     print(f"  Weighted F1: {baseline['weighted_f1']:.3f}")
@@ -255,7 +280,7 @@ def main(
     results = {}
     for layer, probe in probes.items():
         print(f"\nEvaluating layer {layer}")
-        metrics = evaluate_probe(model, probe, test_loader, device, layer, train_toks)
+        metrics = evaluate_probe(model, probe, test_loader, device, layer, train_toks, frequent_deps)
         results[layer] = metrics
         print(f"Balanced accuracy: {metrics['balanced_accuracy']:.3f}")
         print(f"Improvement over majority baseline:")
@@ -263,9 +288,9 @@ def main(
         print(f"  Weighted F1: {metrics['weighted_f1'] - baseline['weighted_f1']:.3f}")
 
     # Plot results
-    plot_layer_results(results, baseline, save_path=f"figures/evals/eval_{train_toks}_results_layers_{min(probes.keys())}-{max(probes.keys())}.png")
+    plot_layer_results(results, baseline, save_path=f"figures/evals/eval_{train_toks}_results_layers_{min(probes.keys())}-{max(probes.keys())}_ndeps_{len(frequent_deps)}.png")
 
     # Save results with baseline
     results["baseline"] = baseline
-    with open(f"data/evals/eval_{train_toks}_results_layers_{min(probes.keys())}-{max(probes.keys())}.pkl", "wb") as f:
+    with open(f"data/evals/eval_{train_toks}_results_layers_{min(probes.keys())}-{max(probes.keys())}_ndeps_{len(frequent_deps)}.pkl", "wb") as f:
         pickle.dump(results, f)

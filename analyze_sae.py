@@ -52,6 +52,7 @@ def analyze_probe_sae_alignment(
     plot_dashboards: bool = False,
     num_random_samples: int = 10,
     batch_size: int = 8192,  # Process this many features at a time
+    frequent_deps: Optional[List[str]] = None
 ) -> Tuple[Dict[int, Dict[str, List[Tuple[int, float]]]], torch.Tensor, torch.Tensor]:
     """Analyze alignment between probe weights and SAE features.
 
@@ -62,6 +63,7 @@ def analyze_probe_sae_alignment(
         plot_dashboards: Whether to display feature dashboards
         num_random_samples: Number of random samples for null distribution
         batch_size: Number of features to process at a time
+        frequent_deps: Optional list of dependency types to analyze
     """
     if device_sae is None:
         device_sae = torch.device("cuda:1" if torch.cuda.device_count() > 1 else "cuda")
@@ -75,7 +77,7 @@ def analyze_probe_sae_alignment(
     dep_to_idx = DependencyTask.dependency_table()
 
     # Get all dependency types and layers
-    dep_types = sorted(list(dep_to_idx.keys()))
+    dep_types = sorted(frequent_deps) if frequent_deps is not None else sorted(list(dep_to_idx.keys()))
     layers = sorted(list(probes.keys()))
 
     # Create matrices for storing results
@@ -91,6 +93,12 @@ def analyze_probe_sae_alignment(
         # Move probe to SAE GPU and detach from computation graph
         probe = probes[layer].to(device_sae)
         weights = probe.probe.weight.detach()  # [num_relations, hidden_dim]
+
+        # If using frequent_deps, only analyze those weights
+        if frequent_deps is not None:
+            dep_indices = [dep_to_idx[dep] for dep in frequent_deps]
+            weights = weights[dep_indices]
+
         sae_features = sae.W_enc.detach()  # [hidden_dim, num_features]
 
         # Normalize vectors
@@ -266,13 +274,15 @@ def plot_sae_alignment_heatmaps(
 def main(
     probes: Dict[int, nn.Module],
     train_toks: str = "tail",
-    device_sae: Optional[torch.device] = None
+    device_sae: Optional[torch.device] = None,
+    frequent_deps: Optional[List[str]] = None
 ):
     """Main analysis function."""
     print("\nAnalyzing probe-SAE alignment...")
     results, max_sims, rel_sims = analyze_probe_sae_alignment(
         probes,
-        device_sae
+        device_sae,
+        frequent_deps=frequent_deps
     )
 
     print("\nResults:")
@@ -287,11 +297,11 @@ def main(
         rel_sims,
         dep_types,
         layers,
-        save_path=f"figures/sae/sae_alignment_{train_toks}_heatmaps_layers_{min(probes.keys())}-{max(probes.keys())}.png"
+        save_path=f"figures/sae/sae_alignment_{train_toks}_heatmaps_layers_{min(probes.keys())}-{max(probes.keys())}_ndeps_{len(frequent_deps)}.png"
     )
 
     # Save results
     torch.save(
         {"results": results, "max_similarities": max_sims, "relative_similarities": rel_sims},
-        f"data/sae/sae_alignment_{train_toks}_results_layers_{min(probes.keys())}-{max(probes.keys())}.pt"
+        f"data/sae/sae_alignment_{train_toks}_results_layers_{min(probes.keys())}-{max(probes.keys())}_ndeps_{len(frequent_deps)}.pt"
     )

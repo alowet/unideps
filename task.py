@@ -114,9 +114,30 @@ class DependencyTask:
                                 relations[tail_pos, rel_idx] = 1
                                 head_idxs[tail_pos, rel_idx] = head_pos
                             else:
-                                relations[tail_pos, rel_idx] = -1
+                                relations[tail_pos, rel_idx] = torch.nan
 
                     else:
                         print(f"Relation {rel} not found in dependency table")
 
         return relations, head_idxs
+
+    @staticmethod
+    def count_dependencies(dataset) -> Dict[str, int]:
+        """Count occurrences of each dependency relation in the dataset.
+
+        Args:
+            dataset: UDDataset object containing sentences
+        Returns:
+            counts: Dictionary mapping dependency relation names to their counts
+        """
+        dep_table = DependencyTask.dependency_table()
+        counts = {rel: 0 for rel in dep_table.keys()}
+
+        for sentence in dataset:
+            relations, _ = DependencyTask.relations(sentence)
+            # Sum over sequence length dimension to get counts per relation
+            rel_counts = relations.nansum(dim=0)
+            for rel, count in zip(dep_table.keys(), rel_counts):
+                counts[rel] += int(count)
+
+        return counts
