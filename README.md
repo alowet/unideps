@@ -32,3 +32,7 @@ We performed the same analyses for Matryoshka SAEs, and found similar results. I
 ## Conclusion
 
 While still a work in progress, this repo provides a simple framework for studying the relationship between SAE latents and linguistic features. We hope it will be useful for future work in this area.
+
+## Acknowledgements
+
+This work benefited from helpful discussions with [Kola Ayonrinde](https://github.com/koayon), [Jacob Drori](https://github.com/jacobcd52), and [Jake Ward](https://github.com/jnward), organized through [AISC](https://www.aisafety.camp/). 

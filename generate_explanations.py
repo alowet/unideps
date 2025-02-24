@@ -89,7 +89,6 @@ cache.save_config(
 
 # %%
 
-# os.environ["OPENAI_API_KEY"] = "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"
 API_KEY = os.getenv("OPENAI_API_KEY")
 latent_cfg = LatentConfig(
     # width=131072, # The number of latents of your SAE
