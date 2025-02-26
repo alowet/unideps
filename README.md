@@ -35,4 +35,5 @@ While still a work in progress, this repo provides a simple framework for studyi
 
 ## Acknowledgements
 
-This work benefited from helpful discussions with [Kola Ayonrinde](https://github.com/koayon), [Jacob Drori](https://github.com/jacobcd52), and [Jake Ward](https://github.com/jnward), organized through [AISC](https://www.aisafety.camp/). 
+This work benefited from helpful discussions with [Kola Ayonrinde](https://github.com/koayon), [Jacob Drori](https://github.com/jacobcd52), and [Jake Ward](https://github.com/jnward), organized through [AISC](https://www.aisafety.camp/).
+<!-- Funding support was provided to A. Lowet by Open Philanthropy. -->

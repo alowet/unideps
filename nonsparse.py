@@ -148,6 +148,19 @@ def compute_matryoshka_activation_sparsity(
 
     return frac_active
 
+def plot_activation_density(frac_active: np.ndarray, which_sae: str, layer: int):
+    """Plot the activation density for a given latent."""
+    px.histogram(
+            frac_active,
+            nbins=50,
+            title="ACTIVATIONS DENSITY",
+            width=800,
+            template="ggplot2",
+            color_discrete_sequence=["darkorange"],
+            log_y=True,
+        ).update_layout(bargap=0.02, showlegend=False)
+    plt.savefig(f"figures/sparsity/{which_sae}/activation_density_hist_layer_{layer}.png")
+    plt.show()
 
 def analyze_sparsity(
     model: UDTransformer,

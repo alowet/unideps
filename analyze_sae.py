@@ -204,6 +204,58 @@ def analyze_probe_sae_alignment(
     return results, max_similarities, relative_similarities
 
 
+def compute_probe_sae_alignment(
+    probe: nn.Module,
+    sae: SAE,
+    device_sae: torch.device,
+    d_sae: int,
+    batch_size: int = 8192
+):
+    """Compute probe-SAE alignment."""
+
+    with torch.no_grad():
+
+        probe = probe.to(device_sae)
+        weights = probe.probe.weight.detach()  # [num_relations, hidden_dim]
+        sae_features = sae.W_enc.detach()  # [hidden_dim, num_features]
+
+        # Normalize vectors
+        weights_norm = torch.nn.functional.normalize(weights, p=2, dim=1)
+        features_norm = torch.nn.functional.normalize(sae_features, p=2, dim=0)
+
+        # Compute similarities in batches
+        similarities_list = []
+        for start_idx in range(0, d_sae, batch_size):
+            end_idx = min(start_idx + batch_size, d_sae)
+            # Compute similarities for this batch of features
+            batch_similarities = torch.matmul(
+                weights_norm,
+                features_norm[:, start_idx:end_idx]
+            )
+            similarities_list.append(batch_similarities)
+
+        # Concatenate all batches
+        similarities = torch.cat(similarities_list, dim=1).cpu().numpy()
+
+        return similarities
+
+def plot_similarities_hist(similarities: np.ndarray, dep_types: List[str], which_sae: str, layer: int, model_name: str):
+    """Plot histogram of similarities for each dependency type."""
+    n_cols = 11
+    n_rows = len(dep_types) // n_cols + (len(dep_types) % n_cols > 0)
+    fig, axs = plt.subplots(n_rows, n_cols, figsize=(n_cols * 5, n_rows * 5))
+    for i in range(n_rows * n_cols):
+        if i >= len(dep_types):
+            axs[i // n_cols, i % n_cols].axis('off')
+        else:
+            axs[i // n_cols, i % n_cols].hist(similarities[i], bins=50)
+            axs[i // n_cols, i % n_cols].set_title(f"{dep_types[i]}")
+            axs[i // n_cols, i % n_cols].semilogy()
+    plt.tight_layout()
+    plt.savefig(f"figures/sae/{which_sae}/similarities_hist_layer_{layer}_{model_name}.png")
+    plt.show()
+
+
 def print_alignment_results(results: Dict[int, Dict[str, List[Tuple[int, float]]]]):
     """Print human-readable alignment results."""
     for layer in sorted(results.keys()):

@@ -69,6 +69,7 @@ def evaluate_probe(
     # Concatenate all predictions and relations
     all_preds = torch.cat(all_preds, dim=0).numpy()
     all_relations = torch.cat(all_relations, dim=0).numpy()
+    print(all_preds.shape, all_relations.shape)
 
     # Compute metrics
     metrics = {}
@@ -96,13 +97,11 @@ def evaluate_probe(
     # If using frequent_deps, only evaluate those dependencies
     eval_deps = frequent_deps if frequent_deps is not None else dep_to_idx.keys()
 
-    for dep in eval_deps:
-        idx = dep_to_idx[dep]
-        if idx < all_relations.shape[1]:  # Check if this dependency was included in probe
-            acc = balanced_accuracy_score(all_relations[:, idx], all_preds[:, idx])
-            f1 = f1_score(all_relations[:, idx], all_preds[:, idx])
-            per_class_acc[dep] = acc
-            per_class_f1[dep] = f1
+    for idx, dep in enumerate(eval_deps):
+        acc = balanced_accuracy_score(all_relations[:, idx], all_preds[:, idx])
+        f1 = f1_score(all_relations[:, idx], all_preds[:, idx])
+        per_class_acc[dep] = acc
+        per_class_f1[dep] = f1
 
     metrics["per_class_accuracy"] = per_class_acc
     metrics["per_class_f1"] = per_class_f1
@@ -110,12 +109,13 @@ def evaluate_probe(
     return metrics
 
 
-def plot_layer_results(results: Dict[int, Dict[str, float]], baseline: Dict[str, float], save_path: Optional[str] = None):
+def plot_layer_results(results: Dict[int, Dict[str, float]], baseline: Dict[str, float], frequent_deps: Optional[list] = None, save_path: Optional[str] = None):
     """Plot evaluation results across layers.
 
     Args:
         results: Dictionary mapping layer indices to metric dictionaries
         baseline: Dictionary containing baseline metrics
+        frequent_deps: List of dependency types to evaluate on
         save_path: Optional path to save plot
     """
     # Set up plot style
@@ -143,7 +143,7 @@ def plot_layer_results(results: Dict[int, Dict[str, float]], baseline: Dict[str,
     ax1.legend()
 
     # Plot per-class accuracy heatmap
-    dep_types = list(results[layers[0]]["per_class_accuracy"].keys())
+    dep_types = frequent_deps if frequent_deps is not None else list(results[layers[0]]["per_class_accuracy"].keys())
     acc_matrix = np.zeros((len(layers), len(dep_types)))
     f1_matrix = np.zeros((len(layers), len(dep_types)))
 
@@ -288,7 +288,7 @@ def main(
         print(f"  Weighted F1: {metrics['weighted_f1'] - baseline['weighted_f1']:.3f}")
 
     # Plot results
-    plot_layer_results(results, baseline, save_path=f"figures/evals/eval_{train_toks}_results_layers_{min(probes.keys())}-{max(probes.keys())}_ndeps_{len(frequent_deps)}.png")
+    plot_layer_results(results, baseline, frequent_deps, save_path=f"figures/evals/eval_{train_toks}_results_layers_{min(probes.keys())}-{max(probes.keys())}_ndeps_{len(frequent_deps)}.png")
 
     # Save results with baseline
     results["baseline"] = baseline

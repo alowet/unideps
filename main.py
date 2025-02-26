@@ -10,20 +10,26 @@ from rich.table import Table
 from tqdm import tqdm
 
 sys.path.append("../matryoshka_sae")
+import analyze_sae
 import matplotlib.pyplot as plt
+import nonsparse
 import numpy as np
 import pandas as pd
 import plotly.express as px
 import seaborn as sns
 import torch
-from analyze_sae import display_dashboard
+
+importlib.reload(analyze_sae)
+from analyze_sae import *
 from analyze_sae import main as analyze_sae_main
 from darkmatter import main as dm_main
 from data_utils import collate_fn
 from evaluate import main as evaluate_main
 from load_data import UDDataset
 from model_utils import UDTransformer
-from nonsparse import analyze_sparsity, compute_activation_sparsity
+
+importlib.reload(nonsparse)
+from nonsparse import *
 from probing import train_probe
 from sae import GlobalBatchTopKMatryoshkaSAE
 from sae_lens import SAE, ActivationsStore
@@ -33,6 +39,8 @@ from task import DependencyTask
 from torch.cuda import empty_cache
 from torch.utils.data import DataLoader
 from utils import load_sae_from_wandb
+
+from wandb import CommError
 
 # %% Set up devices
 # For now, we're using a single GPU, but in future, could add an option for UDTransformer and SAE to live on different devices
@@ -69,7 +77,8 @@ deps = DependencyTask.dependency_table()
 dep_counts = DependencyTask.count_dependencies(train_data)
 
 # for train_toks in ["last","head"]:
-model_path = f"data/probes/{train_toks}_{which_pos}_min_{min_occurrences}.pkl"
+model_name = f"{train_toks}_{which_pos}_min_{min_occurrences}"
+model_path = f"data/probes/{model_name}.pkl"
 start_time = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 print("Run group:", start_time)
 
@@ -90,45 +99,42 @@ for rel, count in sorted(dep_counts.items(), key=lambda x: x[1], reverse=True):
 
 # %%
 # Load already trained probes
-# with open(model_path, "rb") as f:
-#     probes = pickle.load(f)
+with open(model_path, "rb") as f:
+    probes = pickle.load(f)
 
 
 # %%
-# Train probes for different layers
-# Note this is inefficient in that it re-runs the model (one forward pass per layer), though it stops at layer+1 each time
-# comment this block out if you just want to load probes
-import probing
+# # Train probes for different layers
+# # Note this is inefficient in that it re-runs the model (one forward pass per layer), though it stops at layer+1 each time
+# # comment this block out if you just want to load probes
+# import probing
 
-importlib.reload(probing)
-from probing import train_probe
+# importlib.reload(probing)
+# from probing import train_probe
 
-probes = {}
-for layer in range(ud_model.model.cfg.n_layers):
-    # Pass frequent_deps to compute_loss during training
-    probe = train_probe(
-        ud_model,
-        train_loader,
-        dev_loader,
-        device_model,
-        layer=layer,
-        train_toks=train_toks,
-        run_group=start_time,
-        frequent_deps=list(frequent_deps.keys())
-    )
-    probes[layer] = probe.cpu()
-    del probe
-    empty_cache()
+# probes = {}
+# for layer in range(ud_model.model.cfg.n_layers):
+#     # Pass frequent_deps to compute_loss during training
+#     probe = train_probe(
+#         ud_model,
+#         train_loader,
+#         dev_loader,
+#         device_model,
+#         layer=layer,
+#         train_toks=train_toks,
+#         run_group=start_time,
+#         frequent_deps=list(frequent_deps.keys())
+#     )
+#     probes[layer] = probe.cpu()
+#     del probe
+#     empty_cache()
 
-# %%
-# comment the next line out if you want to overwrite existing probes
-if not os.path.exists(model_path):
-    with open(model_path, "wb") as f:
-        pickle.dump(probes, f)
+# # %%
+# # comment the next line out if you want to overwrite existing probes
+# if not os.path.exists(model_path):
+#     with open(model_path, "wb") as f:
+#         pickle.dump(probes, f)
 
-# %%
-# for speed, select subset of layers
-# probes = {k: v for k, v in probes.items() if k < 7}
 
 # %% Evaluate
 import evaluate
@@ -153,21 +159,11 @@ evaluate_main(
 )
 
 # %%
-layer = 5  # pre layer 5 for probes and SAE
+# use ActivationsStore to stream in data the dataset used to train the Gemma Scope SAEs
 width = 16
-save_path = f'figures/sparsity_layer_{layer}_width_{width}.png'
-which_sae = "pretrained"  # "pretrained" or "matryoshka"
-pre_or_post = "pre"  # "pre" or "post"
-scope_layer = layer if pre_or_post == "pre" else layer - 1
-
-# Load pretrained SAE
 sae_release = "gemma-scope-2b-pt-res-canonical"
-# use layer - 1 for pretrained SAE, because pretrained SAEs use resid_post, but probes use resid_pre
-sae_id = f"layer_{scope_layer}/width_{width}k/canonical"
+sae_id = f"layer_1/width_{width}k/canonical"
 sae = SAE.from_pretrained(sae_release, sae_id, device=str(device_sae))[0]
-d_sae = sae.cfg.d_sae
-
-# use ActivationsStore to stream in data from a given dataset
 act_store = ActivationsStore.from_sae(
     model=ud_model.model,
     sae=sae,
@@ -176,111 +172,65 @@ act_store = ActivationsStore.from_sae(
     n_batches_in_buffer=16,
     device=str(device_sae),
 )
-
-if which_sae == "matryoshka":  # overwrite pretrained SAE with matryoshka SAE
-    del sae
-    # Load Matryoshka SAE
-    # note that this and the probes use resid_pre, whereas the pretrained SAEs use resid_post!!
-    entity = "adam-lowet-harvard-university"
-    project = "batch-topk-matryoshka"
-    sae_id = "gemma-2-2b_blocks.5.hook_resid_pre_36864_global-matryoshka-topk_32_0.0003_122069"
-
-    sae, cfg = load_sae_from_wandb(f"{entity}/{project}/{sae_id}:latest", GlobalBatchTopKMatryoshkaSAE)
-    d_sae = cfg['dict_size']
+d_sae = sae.cfg.d_sae
+del sae
 
 # %%
-# # steer layer 5, latent 11910, which corresponded strongly to `amod` (adjectival modifier)
+# compute alignment between probes and SAE at each layer
+# compute activation density at each layer
+# plot activation density broken out by high vs. low alignment for each dependency relation
 
-# GENERATE_KWARGS = dict(temperature=0.5, freq_penalty=2.0, verbose=False)
-# prompt = "When I look at myself in the mirror, I see"
-# latent_idx = 11910
-# max_new_tokens = 500
-
-# no_steering_output = ud_model.model.generate(prompt, max_new_tokens=max_new_tokens, **GENERATE_KWARGS)
-
-# table = Table(show_header=False, show_lines=True, title="Steering Output")
-# table.add_row("Normal", no_steering_output)
-# for i in tqdm(range(3), "Generating steered examples..."):
-#     table.add_row(
-#         f"Steered #{i}",
-#         generate_with_steering(
-#             ud_model.model,
-#             sae,
-#             prompt,
-#             latent_idx,
-#             steering_coefficient=30.0,  # roughly 1.5x the latent's max activation
-#             max_new_tokens=max_new_tokens,
-#             **GENERATE_KWARGS
-#         )
-#     )
-# rprint(table)
-
-
-# %%
+# critical choice: gemma_scope vs. matryoshka SAE
+which_sae = "gemma_scope"  # "gemma_scope" or "matryoshka"
+pre_or_post = "resid_post" if which_sae == "gemma_scope" else "resid_pre"  # Gemma Scope hooked resid_post; the linear probes and Matryoshka SAEs hooked resid_pre
 if which_sae == "matryoshka":
-    frac_active = compute_matryoshka_activation_sparsity(model.model, sae, act_store, cfg)
-else:
-    frac_active = compute_activation_sparsity(model.model, sae, act_store)
-# analyze_sparsity(
-#     model,
-#     sae,
-#     act_store,
-#     layer,
-#     device_sae,
-#     save_path
-# )
-# %%
-px.histogram(
-        frac_active,
-        nbins=50,
-        title="ACTIVATIONS DENSITY",
-        width=800,
-        template="ggplot2",
-        color_discrete_sequence=["darkorange"],
-        log_y=True,
-    ).update_layout(bargap=0.02, showlegend=False).show()
-# %%
-# (frac_active > .1).sum()
-batch_size = 8192
+    d_sae = 2304*16
 
-with torch.no_grad():
-    # Move probe to SAE GPU and detach from computation graph
-    probe = probes[layer].to(device_sae)
-    weights = probe.probe.weight.detach()  # [num_relations, hidden_dim]
-    sae_features = sae.W_enc.detach()  # [hidden_dim, num_features]
-
-    # Normalize vectors
-    weights_norm = torch.nn.functional.normalize(weights, p=2, dim=1)
-    features_norm = torch.nn.functional.normalize(sae_features, p=2, dim=0)
-
-    # Compute similarities in batches
-    similarities_list = []
-    for start_idx in range(0, d_sae, batch_size):
-        end_idx = min(start_idx + batch_size, d_sae)
-        # Compute similarities for this batch of features
-        batch_similarities = torch.matmul(
-            weights_norm,
-            features_norm[:, start_idx:end_idx]
-        )
-        similarities_list.append(batch_similarities)
-
-    # Concatenate all batches
-    similarities = torch.cat(similarities_list, dim=1)
-
-    # Get max similarity for each relation
-    max_sims, _ = similarities.max(dim=1)  # [num_relations]
-
-    similarities = similarities.cpu().numpy()
-    # max_sims = max_sims.cpu().numpy()
+# wandb settings from Matryoshka SAE training
+entity = "adam-lowet-harvard-university"
+project = "batch-topk-matryoshka"
+all_similarities = np.zeros((ud_model.model.cfg.n_layers - 1, len(frequent_deps), d_sae))
+all_frac_active = np.zeros((ud_model.model.cfg.n_layers - 1, d_sae))
+cfgs = []
 
 # %%
-fig, axs = plt.subplots(8, 7, figsize=(10, 10))
-for i, (ax, rel) in enumerate(zip(axs.flatten(), deps.keys())):
-    ax.hist(similarities[i], bins=50)
-    ax.set_title(f"{rel}")
-    ax.semilogy()
-plt.tight_layout()
-plt.show()
+
+for i_layer, layer in enumerate(range(1, ud_model.model.cfg.n_layers)):
+
+    save_path = f'figures/sparsity_layer_{layer}_width_{width}.png'
+    sae_layer = layer if pre_or_post == "resid_pre" else layer - 1
+
+    if which_sae == "matryoshka":  # overwrite pretrained SAE with matryoshka SAE
+        # Load Matryoshka SAE
+        sae_id = f"gemma-2-2b_blocks.{sae_layer}.hook_resid_pre_36864_global-matryoshka-topk_32_0.0003_122069"
+        try:
+            sae, cfg = load_sae_from_wandb(f"{entity}/{project}/{sae_id}:latest", GlobalBatchTopKMatryoshkaSAE)
+        except CommError:
+            tmp_sae_id = f"gemma-2-2b_blocks.{sae_layer}.hook_resid_pre_36864_batch-topk_32_0.0003_122069"
+            sae, cfg = load_sae_from_wandb(f"{entity}/{project}/{tmp_sae_id}:latest", GlobalBatchTopKMatryoshkaSAE)
+
+        assert d_sae == cfg['dict_size']
+        frac_active = compute_matryoshka_activation_sparsity(ud_model.model, sae, act_store, cfg)
+        cfgs.append(cfg)
+    else:
+        # Load pretrained SAE
+        # use layer - 1 for pretrained SAE, because pretrained SAEs use resid_post, but probes use resid_pre
+        sae_id = f"layer_{sae_layer}/width_{width}k/canonical"
+        sae = SAE.from_pretrained(sae_release, sae_id, device=str(device_sae))[0]
+        assert d_sae == sae.cfg.d_sae
+
+        frac_active = compute_activation_sparsity(ud_model.model, sae, act_store)
+        cfgs.append(sae.cfg)
+
+    plot_activation_density(frac_active, which_sae, layer)
+    all_frac_active[i_layer] = frac_active
+    all_similarities[i_layer] = compute_probe_sae_alignment(probes[layer], sae, device_sae, d_sae)
+
+    plot_similarities_hist(all_similarities[i_layer], list(frequent_deps.keys()), which_sae, layer, model_name)
+
+np.save(f"data/similarities/{which_sae}/all_similarities_width_{width}_{model_name}.npy", all_similarities)
+np.save(f"data/similarities/{which_sae}/all_frac_active_width_{width}.npy", all_frac_active)
+np.save(f"data/similarities/{which_sae}/all_cfgs_width_{width}.npy", cfgs)
 
 # %%
 # We now have similarities of shape [num_relations, d_sae] and frac_active of shape [d_sae]
@@ -313,25 +263,14 @@ for i, rel in enumerate(deps.keys()):
     inter = np.intersect1d(top_sims[i], top_active)
     n = len(inter)
     p = hypergeom(M=d_sae,
-                  n=top_n,
-                  N=top_n).sf(n-1)
+                n=top_n,
+                N=top_n).sf(n-1)
     if p < 0.05:
         all_inters.extend(inter)
     print(f"{rel}: {inter}, p={p:.3f}")
 
-# %%
-# for latent_idx in np.unique(all_inters):
-# for latent_idx in top_active[:22]:
-for latent_idx in [6409]:
-    display_dashboard(
-        sae_release="gemma-scope-2b-pt-res-canonical",
-        sae_id=f"layer_{layer - 1}/width_{width}k/canonical",
-        latent_idx=latent_idx,
-        width=400,
-        height=300
-    )
 
-# %%
+
 # Let's try a different tack: Select only those latents that have activation density > some threshold and see if the cosine sims are higher than for others
 frac_active_threshold = 0.1
 which_active = frac_active > frac_active_threshold
@@ -355,7 +294,6 @@ for dep in deps.keys():
     all_ranksums.append(stats.statistic)
     # print(f"{dep}: {pval:.3f}")
 
-# %%
 incr = 8
 for start in range(0, len(deps), incr):
     # sns.violinplot(data=sim_df, x="relation", y="cosine_sim", hue="is_active", order=list(deps.keys())[start:start+incr])
@@ -371,6 +309,48 @@ for start in range(0, len(deps), incr):
         plt.tight_layout()
         plt.savefig(f"figures/sparsity/frac_active_yvar_{y_var}_hue_{hue_var}_{sae_id.replace('/', '_')}_{list(deps.keys())[start]}_to_{list(deps.keys())[end-1]}.png")
     plt.show()
+
+
+# %%
+# # steer layer 5, latent 11910, which corresponded strongly to `amod` (adjectival modifier)
+
+# GENERATE_KWARGS = dict(temperature=0.5, freq_penalty=2.0, verbose=False)
+# prompt = "When I look at myself in the mirror, I see"
+# latent_idx = 11910
+# max_new_tokens = 500
+
+# no_steering_output = ud_model.model.generate(prompt, max_new_tokens=max_new_tokens, **GENERATE_KWARGS)
+
+# table = Table(show_header=False, show_lines=True, title="Steering Output")
+# table.add_row("Normal", no_steering_output)
+# for i in tqdm(range(3), "Generating steered examples..."):
+#     table.add_row(
+#         f"Steered #{i}",
+#         generate_with_steering(
+#             ud_model.model,
+#             sae,
+#             prompt,
+#             latent_idx,
+#             steering_coefficient=30.0,  # roughly 1.5x the latent's max activation
+#             max_new_tokens=max_new_tokens,
+#             **GENERATE_KWARGS
+#         )
+#     )
+# rprint(table)
+
+
+# %%
+
+# analyze_sparsity(
+#     model,
+#     sae,
+#     act_store,
+#     layer,
+#     device_sae,
+#     save_path
+# )
+# %%
+
 
 
 # %%
@@ -430,7 +410,17 @@ analyze_sae_main(
 # )
 
 
-
+# %%
+# # for latent_idx in np.unique(all_inters):
+# # for latent_idx in top_active[:22]:
+# for latent_idx in [6409]:
+#     display_dashboard(
+#         sae_release="gemma-scope-2b-pt-res-canonical",
+#         sae_id=f"layer_{layer - 1}/width_{width}k/canonical",
+#         latent_idx=latent_idx,
+#         width=400,
+#         height=300
+#     )
 # # %%
 
 # %%
