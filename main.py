@@ -39,12 +39,13 @@ from config import post_init_cfg
 from logs import load_checkpoint
 from nonsparse import *
 from probing import train_probe
+from stats import compute_contingency_test, get_significance_stars, plot_stars
 
 importlib.reload(sae)
 from activation_store import ActivationsStore
 from sae import BatchTopKSAE, GlobalBatchTopKMatryoshkaSAE
 from sae_lens import SAE, ActivationsStore
-from scipy.stats import hypergeom, pearsonr, ranksums
+from scipy.stats import fisher_exact, hypergeom, pearsonr, ranksums
 from steering import generate_with_steering
 from task import DependencyTask
 from torch.cuda import empty_cache
@@ -367,18 +368,19 @@ cos_pct_thresholds = np.logspace(10, 1, n_cos_sim_thresholds, base=0.999)
 # frac_active_thresholds = np.linspace(.01, .7, n_frac_active_thresholds)
 n_sae = len(sae_comp)
 
-frac_dfs = []
-for frac_active_threshold in frac_active_thresholds:
-    active_df[f"frac_active_gt_{frac_active_threshold:.3f}"] = active_df["frac_active"] > frac_active_threshold
-    frac_df = active_df.groupby(["SAE", "Layer"])[f"frac_active_gt_{frac_active_threshold:.3f}"].mean().reset_index(name="frac_active_gt_threshold").assign(frac_active_threshold=frac_active_threshold)
-    frac_dfs.append(frac_df)
-frac_df = pd.concat(frac_dfs, axis=0)
+# # %%
+# frac_dfs = []
+# for frac_active_threshold in frac_active_thresholds:
+#     active_df[f"frac_active_gt_{frac_active_threshold:.3f}"] = active_df["frac_active"] > frac_active_threshold
+#     frac_df = active_df.groupby(["SAE", "Layer"])[f"frac_active_gt_{frac_active_threshold:.3f}"].mean().reset_index(name="frac_active_gt_threshold").assign(frac_active_threshold=frac_active_threshold)
+#     frac_dfs.append(frac_df)
+# frac_df = pd.concat(frac_dfs, axis=0)
 
-sns.relplot(data=frac_df, x="frac_active_threshold", y="frac_active_gt_threshold", hue="SAE", col="Layer", col_wrap=7, kind="line", height=2)
-plt.xscale("log")
-plt.yscale("log")
-plt.savefig(f"figures/sparsity/frac_active_gt_threshold_{model_name}.png")
-plt.show()
+# sns.relplot(data=frac_df, x="frac_active_threshold", y="frac_active_gt_threshold", hue="SAE", col="Layer", col_wrap=7, kind="line", height=2)
+# plt.xscale("log")
+# plt.yscale("log")
+# plt.savefig(f"figures/sparsity/frac_active_gt_threshold_{model_name}.png")
+# plt.show()
 
 
 
@@ -568,46 +570,46 @@ is_active_and_high_sim["frac_independent"] = (is_active_and_high_sim["frac_activ
 
 # compute the log ratio of the two fractions
 is_active_and_high_sim["lr_joint"] = np.log2(is_active_and_high_sim["frac_surviving_total"] / is_active_and_high_sim["frac_independent"])
+# %%
+
+# Apply contingency test to each group
+contingency_results = is_active_and_high_sim.apply(compute_contingency_test, axis=1)
+is_active_and_high_sim = pd.concat([is_active_and_high_sim, contingency_results], axis=1)
+is_active_and_high_sim["significance"] = is_active_and_high_sim["pvalue"].apply(get_significance_stars)
 
 # compute conditional probabilities
 is_active_and_high_sim["frac_high_sim_of_active"] = is_active_and_high_sim["joint_freq"] / is_active_and_high_sim["active_freq"]
 is_active_and_high_sim["frac_active_of_high_sim"] = is_active_and_high_sim["joint_freq"] / is_active_and_high_sim["sim_freq"]
 
+# %%
+import stats
+
+importlib.reload(stats)
+from stats import compute_contingency_test, get_significance_stars, plot_stars
 
 # %%
-# is_active_and_high_sim["frac_not_high_sim_of_active"] = 1 - is_active_and_high_sim["frac_high_sim_of_active"]
-# is_active_and_high_sim["frac_not_active_of_high_sim"] = 1 - is_active_and_high_sim["frac_active_of_high_sim"]
-
-# %%
-# compute the fraction of one but not the other
-# sim - (sim & active) = freq not active and high sim, so divide by sim_freq
-# active - (sim & active) = active and not high sim, so divide by active_freq
-# is_active_and_high_sim["frac_not_active_of_high_sim"] = (is_active_and_high_sim["sim_freq"] - is_active_and_high_sim["joint_freq"]) / is_active_and_high_sim["sim_freq"]
-# is_active_and_high_sim["frac_not_high_sim_of_active"] = (is_active_and_high_sim["active_freq"] - is_active_and_high_sim["joint_freq"]) / is_active_and_high_sim["active_freq"]
-
-# # compute the difference between the two fractions, relative to either active or high sim
-# is_active_and_high_sim["difference_of_active"] = is_active_and_high_sim["frac_high_sim_of_active"] - is_active_and_high_sim["frac_not_high_sim_of_active"]
-# is_active_and_high_sim["difference_of_high_sim"] = is_active_and_high_sim["frac_active_of_high_sim"] - is_active_and_high_sim["frac_not_active_of_high_sim"]
-
-# %%
-
 for sae_name in ["gemma_scope_16"]:  # ["gemma_scope_16", "matryoshka_16"]:
     for start, end in zip(range(0, len(frequent_deps), 7), range(7, len(frequent_deps) + 1, 7)):
 
-        subset = is_active_and_high_sim[np.logical_and.reduce([is_active_and_high_sim["sae"] == sae_name, is_active_and_high_sim["is_active"], is_active_and_high_sim["is_high_sim"], np.isin(is_active_and_high_sim["relation"], list(frequent_deps.keys())[start:end])])].replace([np.inf, -np.inf], np.nan).dropna()
+        subset = is_active_and_high_sim[np.logical_and.reduce([
+            is_active_and_high_sim["sae"] == sae_name,
+            is_active_and_high_sim["is_active"],
+            is_active_and_high_sim["is_high_sim"],
+            np.isin(is_active_and_high_sim["relation"], list(frequent_deps.keys())[start:end])
+        ])]
 
         for xvar, yvar, huevar in [
             ("cosine_sim_cutoff", "lr_joint", "frac_active_threshold"),
-            ("cosine_sim_cutoff", "frac_active_of_high_sim", "frac_active_threshold"),
+            # ("cosine_sim_cutoff", "frac_active_of_high_sim", "frac_active_threshold"),
             ("frac_active_threshold", "lr_joint", "cosine_sim_cutoff"),
-            ("frac_active_threshold", "frac_high_sim_of_active", "cosine_sim_cutoff")
+            # ("frac_active_threshold", "frac_high_sim_of_active", "cosine_sim_cutoff")
             ]:
 
             g = sns.relplot(data=subset, x=xvar, y=yvar, hue=huevar, col="relation", row="layer", kind="line", height=2)
             g.refline(y=0, color="black", linestyle="--")
-            for axvar, scale in [(xvar, plt.xscale), (yvar, plt.yscale)]:
-                if 'frac' in axvar:
-                    scale("log")
+
+            # plot_stars(g, subset, xvar, yvar)
+
             plt.savefig(f"figures/sparsity/xvar_{xvar}_yvar_{yvar}_hue_{huevar}_sae_{sae_name}_col_relation_{start}_{end}_row_layer_{start_layer}_{stop_layer}_{model_name}.png")
             plt.show()
 
