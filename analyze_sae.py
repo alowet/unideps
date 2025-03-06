@@ -1,6 +1,7 @@
 """Analyze relationship between probe weights and SAE features."""
 
 import gc
+import os
 from typing import Dict, List, Optional, Tuple
 
 import matplotlib.pyplot as plt
@@ -239,7 +240,7 @@ def compute_probe_sae_alignment(
 
         return similarities
 
-def plot_similarities_hist(similarities: np.ndarray, dep_types: List[str], which_sae: str, layer: int, model_name: str):
+def plot_similarities_hist(similarities: np.ndarray, dep_types: List[str], which_sae: str, layer: int, width: int, model_name: str):
     """Plot histogram of similarities for each dependency type."""
     n_cols = 11
     n_rows = len(dep_types) // n_cols + (len(dep_types) % n_cols > 0)
@@ -252,7 +253,8 @@ def plot_similarities_hist(similarities: np.ndarray, dep_types: List[str], which
             axs[i // n_cols, i % n_cols].set_title(f"{dep_types[i]}")
             axs[i // n_cols, i % n_cols].semilogy()
     plt.tight_layout()
-    plt.savefig(f"figures/sae/{which_sae}/similarities_hist_layer_{layer}_{model_name}.png")
+    os.makedirs(f"figures/sae/{which_sae}", exist_ok=True)
+    plt.savefig(f"figures/sae/{which_sae}/similarities_hist_layer_{layer}_width_{width}k_{model_name}.png")
     plt.show()
 
 

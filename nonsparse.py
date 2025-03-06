@@ -11,6 +11,9 @@ import torch
 from analyze_sae import cleanup_gpu_memory
 
 sys.path.append("../matryoshka_sae")
+import os
+
+import kaleido
 from model_utils import UDTransformer
 from sae import GlobalBatchTopKMatryoshkaSAE
 from sae_lens import SAE, ActivationsStore, HookedSAETransformer
@@ -148,9 +151,9 @@ def compute_matryoshka_activation_sparsity(
 
     return frac_active
 
-def plot_activation_density(frac_active: np.ndarray, which_sae: str, layer: int):
+def plot_activation_density(frac_active: np.ndarray, which_sae: str, layer: int, width: int):
     """Plot the activation density for a given latent."""
-    px.histogram(
+    fig = px.histogram(
             frac_active,
             nbins=50,
             title="ACTIVATIONS DENSITY",
@@ -159,8 +162,9 @@ def plot_activation_density(frac_active: np.ndarray, which_sae: str, layer: int)
             color_discrete_sequence=["darkorange"],
             log_y=True,
         ).update_layout(bargap=0.02, showlegend=False)
-    plt.savefig(f"figures/sparsity/{which_sae}/activation_density_hist_layer_{layer}.png")
-    plt.show()
+    os.makedirs(f"figures/sparsity/{which_sae}", exist_ok=True)
+    fig.write_image(f"figures/sparsity/{which_sae}/activation_density_hist_layer_{layer}_width_{width}k.png", engine="kaleido")
+    fig.show()
 
 def analyze_sparsity(
     model: UDTransformer,
