@@ -29,7 +29,8 @@ from analyze_sae import *
 # from analyze_sae import main as analyze_sae_main
 from darkmatter import main as dm_main
 from data_utils import collate_fn
-from evaluate import main as evaluate_main
+# from evaluate import main as evaluate_main
+from evaluate_merged import main as evaluate_merged_main
 from load_data import UDDataset
 from model_utils import UDTransformer
 from scipy import stats
@@ -39,7 +40,8 @@ import sae
 from config import post_init_cfg
 from logs import load_checkpoint
 from nonsparse import *
-from probing import train_probe
+# from probing import train_probe
+from probing_merged import train_probe
 from stats import compute_contingency_test, get_significance_stars, plot_stars
 
 importlib.reload(sae)
@@ -68,15 +70,17 @@ train_data = UDDataset("data/UD_English-EWT/en_ewt-ud-train.conllu", max_sentenc
 dev_data = UDDataset("data/UD_English-EWT/en_ewt-ud-dev.conllu", max_sentences=1024)
 
 # %%
+sentence_batch_size = 32 if str(torch.cuda.mem_get_info()[1]).startswith("20") else 512
+
 train_loader = DataLoader(
     train_data,
-    batch_size=512,
+    batch_size=sentence_batch_size,
     shuffle=True,
     collate_fn=lambda x: collate_fn(x)
 )
 dev_loader = DataLoader(
     dev_data,
-    batch_size=512,
+    batch_size=sentence_batch_size,
     collate_fn=lambda x: collate_fn(x)
 )
 
@@ -85,6 +89,7 @@ dev_loader = DataLoader(
 ud_model = UDTransformer(model_name="gemma-2-2b", device=device_model)
 
 # %%
+probe_type = "binary"  # "multiclass" or "binary"
 train_toks = "tail"
 which_pos = "trail"
 min_occurrences = 20
@@ -92,7 +97,7 @@ deps = DependencyTask.dependency_table()
 dep_counts = DependencyTask.count_dependencies(train_data)
 
 # for train_toks in ["last","head"]:
-model_name = f"{train_toks}_{which_pos}_min_{min_occurrences}"
+model_name = f"{probe_type}_{train_toks}_{which_pos}_min_{min_occurrences}"
 model_path = f"data/probes/{model_name}.pkl"
 start_time = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 print("Run group:", start_time)
@@ -114,66 +119,83 @@ for rel, count in sorted(dep_counts.items(), key=lambda x: x[1], reverse=True):
 
 
 # %%
-# Load already trained probes
-with open(model_path, "rb") as f:
-    probes = pickle.load(f)
+# # Load already trained probes
+# with open(model_path, "rb") as f:
+#     probes = pickle.load(f)
 
 
 # %%
-# # Train probes for different layers
-# # Note this is inefficient in that it re-runs the model (one forward pass per layer), though it stops at layer+1 each time
-# # comment this block out if you just want to load probes
-# # import probing
+# Train probes for different layers
+# Note this is inefficient in that it re-runs the model (one forward pass per layer), though it stops at layer+1 each time
+# comment this block out if you just want to load probes
+# import probing
 
-# # importlib.reload(probing)
-# # from probing import train_probe
+# importlib.reload(probing)
+# from probing import train_probe
 
-# probes = {}
-# for layer in range(ud_model.model.cfg.n_layers):
-#     # Pass frequent_deps to compute_loss during training
-#     probe = train_probe(
-#         ud_model,
-#         train_loader,
-#         dev_loader,
-#         device_model,
-#         layer=layer,
-#         train_toks=train_toks,
-#         run_group=start_time,
-#         frequent_deps=list(frequent_deps.keys())
-#     )
-#     probes[layer] = probe.cpu()
-#     del probe
-#     empty_cache()
+probes = {}
+for layer in range(ud_model.model.cfg.n_layers):
+    # Pass frequent_deps to compute_loss during training
+    # probe = train_probe(
+    #     ud_model,
+    #     train_loader,
+    #     dev_loader,
+    #     device_model,
+    #     layer=layer,
+    #     train_toks=train_toks,
+    #     run_group=start_time,
+    #     frequent_deps=list(frequent_deps.keys())
+    # )
 
-# # %%
-# # comment the next line out if you want to overwrite existing probes
-# # if not os.path.exists(model_path):
-# with open(model_path, "wb") as f:
-#     print(f"Saving probes to {model_path}")
-#     pickle.dump(probes, f)
+    probe = train_probe(
+        model=ud_model,
+        train_loader=train_loader,
+        dev_loader=dev_loader,
+        device=device_model,
+        layer=layer,
+        train_toks=train_toks,
+        run_group=start_time,
+        frequent_deps=list(frequent_deps.keys()),
+        probe_type="binary"
+    )
+
+    probes[layer] = probe.cpu()
+    del probe
+    empty_cache()
+    break
+
+# %%
+# examine probes
+
+# %%
+# comment the next line out if you want to overwrite existing probes
+# if not os.path.exists(model_path):
+with open(model_path, "wb") as f:
+    print(f"Saving probes to {model_path}")
+    pickle.dump(probes, f)
 
 
-# # %% Evaluate
-# # import evaluate
-
-# # importlib.reload(evaluate)
-# # from evaluate import main as evaluate_main
+# %% Evaluate
+# import evaluate_merged
+# importlib.reload(evaluate)
+# from evaluate import main as evaluate_merged_main
 
 test_data = UDDataset("data/UD_English-EWT/en_ewt-ud-test.conllu", max_sentences=1024)
 test_loader = DataLoader(
     test_data,
-    batch_size=512,
+    batch_size=sentence_batch_size,
     collate_fn=collate_fn
 )
 
-# evaluate_main(
-#     test_loader,
-#     probes,
-#     ud_model,
-#     train_toks=train_toks,
-#     device=device_model,
-#     frequent_deps=list(frequent_deps.keys())
-# )
+evaluate_merged_main(
+    test_loader,
+    probes,
+    ud_model,
+    train_toks=train_toks,
+    device=device_model,
+    frequent_deps=list(frequent_deps.keys()),
+    probe_type=probe_type
+)
 
 # # %%
 # # plot the correlation matrix for probes themselves

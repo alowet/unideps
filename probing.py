@@ -4,12 +4,11 @@ from typing import Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
+import wandb
 from model_utils import UDTransformer
 from task import DependencyTask
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-
-import wandb
 
 
 class DependencyProbe(nn.Module):
@@ -30,7 +29,7 @@ def compute_loss(probe: DependencyProbe,
                 layer: int,
                 device: torch.device,
                 train_toks: str = "tail",
-                criterion: nn.modules.loss._Loss = nn.BCEWithLogitsLoss,
+                criterion: nn.Module = nn.BCEWithLogitsLoss(reduction='mean'),
                 return_type: str = "loss",
                 frequent_deps: Optional[list] = None) -> Tuple[torch.Tensor, torch.Tensor]:
     """Compute loss for a single batch.
@@ -155,7 +154,6 @@ def train_probe(
     probe = DependencyProbe(hidden_dim, num_relations).to(device)
     optimizer = torch.optim.Adam(probe.parameters(), lr=learning_rate)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=1)
-    criterion = nn.BCEWithLogitsLoss(reduction='mean')
 
     # Track best model
     best_dev_loss = float('inf')
@@ -174,7 +172,7 @@ def train_probe(
             optimizer.zero_grad()
 
             # Compute loss and update
-            loss, _ = compute_loss(probe, model, batch, layer, device, train_toks=train_toks, criterion=criterion, return_type="loss", frequent_deps=frequent_deps)
+            loss, _ = compute_loss(probe, model, batch, layer, device, train_toks=train_toks, return_type="loss", frequent_deps=frequent_deps)
             loss.backward()
             optimizer.step()
 
@@ -199,7 +197,7 @@ def train_probe(
 
         with torch.no_grad():
             for batch in tqdm(dev_loader, desc='Evaluating'):
-                loss, _ = compute_loss(probe, model, batch, layer, device, train_toks=train_toks, criterion=criterion, return_type="loss", frequent_deps=frequent_deps)
+                loss, _ = compute_loss(probe, model, batch, layer, device, train_toks=train_toks, return_type="loss", frequent_deps=frequent_deps)
                 total_loss += loss.item()
                 num_batches += 1
 

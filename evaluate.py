@@ -67,8 +67,8 @@ def evaluate_probe(
             all_relations.append(relations_masked.cpu())
 
     # Concatenate all predictions and relations
-    all_preds = torch.cat(all_preds, dim=0).numpy()
-    all_relations = torch.cat(all_relations, dim=0).numpy()
+    all_preds = torch.cat(all_preds, dim=0).numpy()  # [n_tokens, n_deps]
+    all_relations = torch.cat(all_relations, dim=0).numpy()  # [n_tokens, n_deps]
     print(all_preds.shape, all_relations.shape)
 
     # Compute metrics
