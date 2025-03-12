@@ -25,7 +25,8 @@ import torch
 
 importlib.reload(analyze_sae)
 from analyze_sae import *
-from analyze_sae import main as analyze_sae_main
+
+# from analyze_sae import main as analyze_sae_main
 from darkmatter import main as dm_main
 from data_utils import collate_fn
 from evaluate import main as evaluate_main
@@ -43,6 +44,8 @@ from stats import compute_contingency_test, get_significance_stars, plot_stars
 
 importlib.reload(sae)
 from activation_store import ActivationsStore
+from evaluate_top_latents import get_top_latents_per_dep
+from evaluate_top_latents import main as evaluate_top_latents_main
 from sae import BatchTopKSAE, GlobalBatchTopKMatryoshkaSAE
 from sae_lens import SAE, ActivationsStore
 from scipy.stats import fisher_exact, hypergeom, pearsonr, ranksums
@@ -56,7 +59,7 @@ from wandb import CommError
 
 # %% Set up devices
 # For now, we're using a single GPU, but in future, could add an option for UDTransformer and SAE to live on different devices
-device_model = torch.device("cuda") if torch.cuda.is_available() else torch.device("mps")
+device_model = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 device_sae = device_model
 
 
@@ -84,7 +87,7 @@ ud_model = UDTransformer(model_name="gemma-2-2b", device=device_model)
 # %%
 train_toks = "tail"
 which_pos = "trail"
-min_occurrences = 50
+min_occurrences = 20
 deps = DependencyTask.dependency_table()
 dep_counts = DependencyTask.count_dependencies(train_data)
 
@@ -120,10 +123,10 @@ with open(model_path, "rb") as f:
 # # Train probes for different layers
 # # Note this is inefficient in that it re-runs the model (one forward pass per layer), though it stops at layer+1 each time
 # # comment this block out if you just want to load probes
-# import probing
+# # import probing
 
-# importlib.reload(probing)
-# from probing import train_probe
+# # importlib.reload(probing)
+# # from probing import train_probe
 
 # probes = {}
 # for layer in range(ud_model.model.cfg.n_layers):
@@ -144,23 +147,24 @@ with open(model_path, "rb") as f:
 
 # # %%
 # # comment the next line out if you want to overwrite existing probes
-# if not os.path.exists(model_path):
-#     with open(model_path, "wb") as f:
-#         pickle.dump(probes, f)
+# # if not os.path.exists(model_path):
+# with open(model_path, "wb") as f:
+#     print(f"Saving probes to {model_path}")
+#     pickle.dump(probes, f)
 
 
-# %% Evaluate
-# import evaluate
+# # %% Evaluate
+# # import evaluate
 
-# importlib.reload(evaluate)
-# from evaluate import main as evaluate_main
+# # importlib.reload(evaluate)
+# # from evaluate import main as evaluate_main
 
-# test_data = UDDataset("data/UD_English-EWT/en_ewt-ud-test.conllu", max_sentences=1024)
-# test_loader = DataLoader(
-#     test_data,
-#     batch_size=128,
-#     collate_fn=collate_fn
-# )
+test_data = UDDataset("data/UD_English-EWT/en_ewt-ud-test.conllu", max_sentences=1024)
+test_loader = DataLoader(
+    test_data,
+    batch_size=128,
+    collate_fn=collate_fn
+)
 
 # evaluate_main(
 #     test_loader,
@@ -171,7 +175,7 @@ with open(model_path, "rb") as f:
 #     frequent_deps=list(frequent_deps.keys())
 # )
 
-# %%
+# # %%
 # # plot the correlation matrix for probes themselves
 # probe_weights = np.array([probe.probe.weight.detach().cpu().numpy() for probe in probes.values()])
 # print(probe_weights.shape)
@@ -218,7 +222,7 @@ with open(model_path, "rb") as f:
 which_sae = "matryoshka"  # "gemma_scope" or "matryoshka" or "batch-topk"
 pre_or_post = "resid_post" if which_sae == "gemma_scope" else "resid_pre"  # Gemma Scope hooked resid_post; the linear probes and other SAEs hooked resid_pre
 # n_sim_layers = ud_model.model.cfg.n_layers - 1
-n_sim_layers = 25
+n_sim_layers = ud_model.model.cfg.n_layers if which_sae == "gemma_scope" else ud_model.model.cfg.n_layers - 1
 # wandb settings from Matryoshka SAE training
 entity = "adam-lowet-harvard-university"
 project = "batch-topk-matryoshka"
@@ -227,6 +231,15 @@ width = 16
 # %%
 # # this only needs to be run once
 # # use ActivationsStore to stream in data the dataset used to train the Gemma Scope SAEs
+
+# import analyze_sae
+
+# importlib.reload(analyze_sae)
+# from analyze_sae import (
+#     compute_probe_sae_alignment,
+#     plot_similarities_hist,
+#     plot_similarity_significance_all_layers,
+# )
 
 # sae_release = "gemma-scope-2b-pt-res-canonical"
 # sae_id = f"layer_1/width_{width}k/canonical"
@@ -245,14 +258,19 @@ width = 16
 #     d_sae = sae.cfg.d_sae
 # del sae
 
-# all_similarities = np.zeros((n_sim_layers, ndeps, d_sae))
+# n_permutations = 100
+# enc_similarities = np.zeros((n_sim_layers, ndeps, d_sae))
+# dec_similarities = np.zeros((n_sim_layers, ndeps, d_sae))
+# enc_null_maxes = np.zeros((n_sim_layers, ndeps, n_permutations))
+# dec_null_maxes = np.zeros((n_sim_layers, ndeps, n_permutations))
 # all_frac_active = np.zeros((n_sim_layers, d_sae))
 # cfgs = []
 
-# for i_layer, layer in enumerate(range(1, n_sim_layers + 1)):
+# # for i_layer, layer in enumerate(range(1, n_sim_layers + 1)):
+# for i_layer, layer in tqdm(enumerate(range(n_sim_layers)), desc="Layers", total=n_sim_layers):
 
 #     save_path = f'figures/sparsity_layer_{layer}_width_{width}.png'
-#     sae_layer = layer if pre_or_post == "resid_pre" else layer - 1
+#     sae_layer = layer + 1 if pre_or_post == "resid_pre" else layer
 
 #     if which_sae == "gemma_scope":
 #         # Load pretrained SAE
@@ -271,8 +289,8 @@ width = 16
 #             sae, cfg = load_sae_from_wandb(f"{entity}/{project}/{sae_id}:latest", GlobalBatchTopKMatryoshkaSAE)
 
 #         elif which_sae == "batch-topk":
-#             # sae_id = f"gemma-2-2b_blocks.{sae_layer}.hook_resid_pre_36864_batch-topk_32_0.0003"
-#             sae_id = f"gemma-2-2b_blocks.{sae_layer}.hook_resid_pre_18432_batch-topk_29_0.0003"
+#             sae_id = f"gemma-2-2b_blocks.{sae_layer}.hook_resid_pre_36864_batch-topk_32_0.0003"
+#             # sae_id = f"gemma-2-2b_blocks.{sae_layer}.hook_resid_pre_18432_batch-topk_29_0.0003"
 #             tmp_cfg = {"name": sae_id}
 #             state_dict, start_step = load_checkpoint(tmp_cfg)
 #             print(f"Loaded state_dict from checkpoint {sae_id} at step {start_step - 1}")
@@ -295,58 +313,153 @@ width = 16
 
 #     plot_activation_density(frac_active, which_sae, layer, width)
 #     all_frac_active[i_layer] = frac_active
-#     all_similarities[i_layer] = compute_probe_sae_alignment(probes[layer], sae, device_sae, d_sae)
-#     plot_similarities_hist(all_similarities[i_layer], list(frequent_deps.keys()), which_sae, layer, width, model_name)
+#     enc_similarities[i_layer], dec_similarities[i_layer], enc_null_maxes[i_layer], dec_null_maxes[i_layer] = compute_probe_sae_alignment(probes[layer], sae, device_sae, d_sae, n_permutations=n_permutations, permute_features=True)
+#     plot_similarities_hist(enc_similarities[i_layer], list(frequent_deps.keys()), which_sae, layer, width, model_name)
 
-# # %%
-# # save the results
+# # # %%
+# # # save the results
 # os.makedirs(f"data/similarities/{which_sae}", exist_ok=True)
-# np.save(f"data/similarities/{which_sae}/all_similarities_width_{width}_{model_name}.npy", all_similarities)
-# np.save(f"data/similarities/{which_sae}/all_frac_active_width_{width}.npy", all_frac_active)
-# np.save(f"data/similarities/{which_sae}/all_cfgs_width_{width}.npy", cfgs)
+# np.save(f"data/similarities/{which_sae}/enc_similarities_width_{width}_{model_name}.npy", enc_similarities)
+# np.save(f"data/similarities/{which_sae}/dec_similarities_width_{width}_{model_name}.npy", dec_similarities)
+# np.save(f"data/similarities/{which_sae}/enc_null_maxes_width_{width}_{model_name}.npy", enc_null_maxes)
+# np.save(f"data/similarities/{which_sae}/dec_null_maxes_width_{width}_{model_name}.npy", dec_null_maxes)
+# np.save(f"data/similarities/{which_sae}/all_frac_active_width_{width}_{model_name}.npy", all_frac_active)
+# np.save(f"data/similarities/{which_sae}/all_cfgs_width_{width}_{model_name}.npy", cfgs)
 
 
 # %%
 # We now have all_similarities of shape [n_layers, n_relations, d_sae] and frac_active of shape [n_layers, d_sae]
 sae_comp = {}
 for sae_name, sae_width in [("gemma_scope", 16), ("matryoshka", 16)]:
-    all_similarities = np.load(f"data/similarities/{sae_name}/all_similarities_width_{sae_width}_{model_name}.npy")
-    max_similarities = np.max(all_similarities, axis=-1)
-    all_frac_active = np.load(f"data/similarities/{sae_name}/all_frac_active_width_{sae_width}.npy")
-    cfgs = np.load(f"data/similarities/{sae_name}/all_cfgs_width_{sae_width}.npy", allow_pickle=True)
-    sae_comp['_'.join([sae_name, str(sae_width)])] = dict(all_similarities=all_similarities, all_frac_active=all_frac_active, cfgs=cfgs, max_similarities=max_similarities)
+    enc_similarities = np.load(f"data/similarities/{sae_name}/enc_similarities_width_{sae_width}_{model_name}.npy")
+    dec_similarities = np.load(f"data/similarities/{sae_name}/dec_similarities_width_{sae_width}_{model_name}.npy")
+    max_enc_similarities = np.max(enc_similarities, axis=-1)
+    max_dec_similarities = np.max(dec_similarities, axis=-1)
+    enc_null_maxes = np.load(f"data/similarities/{sae_name}/enc_null_maxes_width_{sae_width}_{model_name}.npy")
+    dec_null_maxes = np.load(f"data/similarities/{sae_name}/dec_null_maxes_width_{sae_width}_{model_name}.npy")
+    all_frac_active = np.load(f"data/similarities/{sae_name}/all_frac_active_width_{sae_width}_{model_name}.npy")
+    cfgs = np.load(f"data/similarities/{sae_name}/all_cfgs_width_{sae_width}_{model_name}.npy", allow_pickle=True)
+
+    sae_comp['_'.join([sae_name, str(sae_width)])] = dict(enc_similarities=enc_similarities, dec_similarities=dec_similarities, all_frac_active=all_frac_active, cfgs=cfgs, max_enc_similarities=max_enc_similarities, max_dec_similarities=max_dec_similarities, enc_null_maxes=enc_null_maxes, dec_null_maxes=dec_null_maxes, n_layers=ud_model.model.cfg.n_layers if sae_name == "gemma_scope" else ud_model.model.cfg.n_layers - 1, start_layer=0 if sae_name == "gemma_scope" else 1)
+
+# %%
+# Compute precision, recall and F1 scores for each latent and plot for top latents
+import evaluate_top_latents
+
+importlib.reload(evaluate_top_latents)
+from evaluate_top_latents import (
+    get_top_latents_per_dep,
+    evaluate_latent_predictions,
+    plot_precision_recall,
+    evaluate_all_latents,
+    main as evaluate_top_latents_main
+)
+
+# Get top 2 simlarities and their indices
+n_top = 1000
+
+for sae_name, sae_vals in sae_comp.items():
+
+    which_sae = '_'.join(sae_name.split('_')[:-1])
+    fpath = f"data/sae/{which_sae}/top_latents_evaluation_{model_name}.parquet"
+    # if os.path.exists(fpath):
+    #     results_df = pd.read_parquet(fpath)
+    #     # with open(f"data/sae/{which_sae}/stats_{model_name}.pkl", "rb") as f:
+    #     #     stats = pickle.load(f)
+    #     top_latents = get_top_latents_per_dep(sae_vals["dec_similarities"], list(frequent_deps.keys()), n_top)
+    #     stats = plot_precision_recall(results_df, top_latents=top_latents, save_path=f"figures/sae/{which_sae}/top_{n_top}latents_evaluation_{model_name}.png")
+    # else:
+    results_df, stats = evaluate_top_latents_main(
+        ud_model=ud_model,
+        train_loader=train_loader,
+        test_loader=test_loader,
+        similarities=sae_vals["dec_similarities"],
+        frequent_deps=list(frequent_deps.keys()),
+        n_top=n_top,
+        which_sae=which_sae,
+        device=device_sae,
+        model_name=model_name,
+        start_layer=0,
+        stop_layer=sae_vals["n_layers"]
+    )
+
+    sae_vals["results_df"] = results_df
+    sae_vals["stats"] = stats
+
+# %%
+# Compute z-scores and p-values for this layer
+import analyze_sae
+
+importlib.reload(analyze_sae)
+from analyze_sae import plot_similarity_significance_all_layers
+
+for sae_name, sae_vals in sae_comp.items():
+    sae_vals["enc_z_scores"], sae_vals["dec_z_scores"], sae_vals["diff_z_scores"] = plot_similarity_significance_all_layers(sae_vals["max_enc_similarities"], sae_vals["max_dec_similarities"], sae_vals["enc_null_maxes"], sae_vals["dec_null_maxes"], list(frequent_deps.keys()), sae_vals["n_layers"], sae_type='_'.join(sae_name.split('_')[:-1]), model_name=model_name)
+
 
 # %%
 # simply plot a heatmap of the difference in max similarity between SAEs
 norm = plt.Normalize(vmin=-1, vmax=1)
 # matrices = [sae_comp["matryoshka_16"]["max_similarities"] - sae_comp["batch-topk_16"]["max_similarities"], sae_comp["matryoshka_16"]["max_similarities"], sae_comp["batch-topk_16"]["max_similarities"]]
-matrices = [sae_comp["matryoshka_16"]["max_similarities"] - sae_comp["gemma_scope_16"]["max_similarities"], sae_comp["matryoshka_16"]["max_similarities"], sae_comp["gemma_scope_16"]["max_similarities"]]
-titles = ["Difference in max similarity: Matryoshka - Gemma Scope", "Matryoshka max similarity", "Gemma Scope max similarity"]
-for matrix, title in zip(matrices, titles):
-    ax = sns.heatmap(matrix, cmap="RdBu_r", norm=norm, xticklabels=list(frequent_deps.keys()), yticklabels=range(n_sim_layers))
-    ax.set_xlabel("Relation")
-    ax.set_ylabel("Layer")
-    ax.set_title(title)
+for which_W in ["enc", "dec"]:
+    matrices = [sae_comp["matryoshka_16"][f"max_{which_W}_similarities"] - sae_comp["gemma_scope_16"][f"max_{which_W}_similarities"][1:], sae_comp["matryoshka_16"][f"max_{which_W}_similarities"], sae_comp["gemma_scope_16"][f"max_{which_W}_similarities"][1:]]
+    titles = [f"Difference in max {which_W} similarity: Matryoshka - Gemma Scope", f"Matryoshka max {which_W} similarity", f"Gemma Scope max {which_W} similarity"]
+    for matrix, title in zip(matrices, titles):
+        ax = sns.heatmap(matrix, cmap="RdBu_r", norm=norm, xticklabels=list(frequent_deps.keys()), yticklabels=np.arange(1, ud_model.model.cfg.n_layers))
+        ax.set_xlabel("Relation")
+        ax.set_ylabel("Layer")
+        ax.set_title(title)
+        plt.show()
+
+
+# %%
+# Compare F1 scores for linear probes vs. SAEs
+
+with open(f"data/evals/eval_{train_toks}_results_layers_{min(probes.keys())}-{max(probes.keys())}_ndeps_{len(frequent_deps)}.pkl", "rb") as f:
+    results = pickle.load(f)
+probe_f1_matrix = np.array([list(results[layer]["per_class_f1"].values()) for layer in results.keys() if isinstance(layer, int)])
+
+cmap = plt.cm.RdBu_r
+norm = plt.Normalize(vmin=-1, vmax=1)
+
+for sae_name, sae_vals in sae_comp.items():
+    # print(sae_name)
+    # print(sae_vals["f1_matrix"])
+    f1_diff = probe_f1_matrix[sae_vals["start_layer"]:] - sae_vals["stats"]["f1"]
+    sns.heatmap(f1_diff, cmap="RdBu_r", norm=norm, xticklabels=list(frequent_deps.keys()), yticklabels=np.arange(sae_vals["start_layer"], sae_vals["start_layer"] + sae_vals["n_layers"]))
+    plt.title(f"Linear Probe $-$ {sae_name} SAE F1 score difference")
     plt.show()
 
 # %%
+# Plot dashboards for each of the top latents
+for i_dep, (dep, top_latents_per_dep) in enumerate(top_latents.items()):
+    for layer, latent in top_latents_per_dep[:2]:
+        print(f"Dependency {dep}, Layer {layer}, Latent {latent}: Similarity = {sae_comp['gemma_scope_16']['dec_similarities'][layer, i_dep, latent]:.4f}")
+        display_dashboard(
+            sae_release="gemma-scope-2b-pt-res-canonical",
+            sae_id=f"layer_{layer}/width_16k/canonical",
+            latent_idx=latent,
+            width=800,
+            height=600
+
+# %%
 # plot fraction of dead latents for each SAE
-dead_df = pd.concat([pd.DataFrame((sae_vals["all_frac_active"] == 0).T.mean(axis=0, keepdims=True), columns=[i for i in range(1, ud_model.model.cfg.n_layers)]).assign(SAE=sae_name) for sae_name, sae_vals in sae_comp.items()], axis=0)
+dead_df = pd.concat([pd.DataFrame((sae_vals["all_frac_active"] == 0).T.mean(axis=0, keepdims=True), columns=[i for i in range(sae_vals["start_layer"], ud_model.model.cfg.n_layers)]).assign(SAE=sae_name) for sae_name, sae_vals in sae_comp.items()], axis=0)
 dead_df = dead_df.melt(id_vars=["SAE"], var_name="Layer", value_name="frac_dead")
 sns.relplot(data=dead_df, x="Layer", y="frac_dead", hue="SAE", kind="line", height=2, aspect=1.5)
 plt.show()
 
 # %%
 # very simply, compare the distributions of frac_active for each SAE across layers
-active_df = pd.concat([pd.DataFrame(sae_vals["all_frac_active"].T, columns=[i for i in range(1, ud_model.model.cfg.n_layers)]).assign(SAE=sae_name, latent_idx=np.arange(sae_vals["all_frac_active"].shape[1])) for sae_name, sae_vals in sae_comp.items()], axis=0)
+active_df = pd.concat([pd.DataFrame(sae_vals["all_frac_active"].T, columns=[i for i in range(sae_vals["start_layer"], ud_model.model.cfg.n_layers)]).assign(SAE=sae_name, latent_idx=np.arange(sae_vals["all_frac_active"].shape[1])) for sae_name, sae_vals in sae_comp.items()], axis=0)
 active_df = active_df.melt(id_vars=["SAE", "latent_idx"], var_name="Layer", value_name="frac_active")
 
 # %%
-# # plot the fract_active histograms per layer on top of each other
-# sns.displot(data=active_df, x="frac_active", hue="SAE", col="Layer", col_wrap=7, kind="hist", height=2, common_norm=False, stat="probability", log_scale=True)
-# plt.yscale("log")
-# plt.savefig(f"figures/sparsity/frac_active_hist_{model_name}.png")
-# plt.show()
+# plot the fract_active histograms per layer on top of each other
+sns.displot(data=active_df[active_df["SAE"] == "gemma_scope_16"], x="frac_active", hue="Layer", col="Layer", col_wrap=7, kind="hist", height=2, common_norm=False, stat="probability", log_scale=True)
+plt.yscale("log")
+plt.savefig(f"figures/sparsity/frac_active_hist_{model_name}.png")
+plt.show()
 
 # # plotting the histogram of frac_active for each SAE across layers, in log scale
 # sns.displot(data=active_df, col="Layer", col_wrap=7, x="frac_active", hue="SAE", kind="hist", log_scale=True, stat="probability", common_norm=False)
@@ -381,8 +494,6 @@ n_sae = len(sae_comp)
 # plt.yscale("log")
 # plt.savefig(f"figures/sparsity/frac_active_gt_threshold_{model_name}.png")
 # plt.show()
-
-
 
 
 # %%
@@ -426,17 +537,18 @@ full_sim_df = pd.DataFrame()
 full_pct_df = pd.DataFrame()
 
 for sae_name, sae_vals in sae_comp.items():
-    d_sae = sae_vals["all_similarities"].shape[2]
+
+    d_sae = sae_vals["dec_similarities"].shape[2]
     # Calculate raw cosine similarities
     sim_df = pd.DataFrame(
-        einops.rearrange(sae_vals["all_similarities"][start_layer:stop_layer],
+        einops.rearrange(sae_vals["dec_similarities"][sae_vals["start_layer"] + start_layer:sae_vals["start_layer"] + stop_layer],
                         "n_layers n_relations d_sae -> (n_layers d_sae) n_relations"),
         columns=list(frequent_deps.keys())
     )
 
     # Calculate percentile rankings of similarities
     similarity_pcts = np.array([
-        [stats.rankdata(sae_vals["all_similarities"][i_layer, i_relation], 'average') / d_sae
+        [stats.rankdata(sae_vals["dec_similarities"][i_layer, i_relation], 'average') / d_sae
          for i_relation in range(ndeps)]
         for i_layer in range(start_layer, stop_layer)
     ])
@@ -483,6 +595,13 @@ for full_df, use_cos_thresholds in zip([full_sim_df, full_pct_df], [cos_sim_thre
 #     sns.displot(data=subset, x="cosine_sim", hue="sae", row="layer", col="relation", kind="hist", height=2, common_norm=False, stat="probability")
 #     plt.savefig(f"figures/sparsity/cosine_sim_distribution_{model_name}_layer_{start_layer}_{stop_layer}_relation_{list(frequent_deps.keys())[start]}_to_{list(frequent_deps.keys())[end-1]}.png")
 #     plt.show()
+
+# rather than compare SAEs, just do this for a subset of the saes/layers
+subset = full_sim_df[np.logical_and(full_sim_df["sae"] == "gemma_scope_16", np.isin(full_sim_df["layer"], [4, 5, 6]))]
+sns.displot(data=subset, x="cosine_sim", col="relation", hue="layer",col_wrap=7, kind="hist", height=2, common_norm=False, stat="probability")
+plt.yscale("log")
+plt.savefig(f"figures/sae/cosine_sim_distribution_hue_layer_gemma_scope_16_layer_{start_layer}_{stop_layer}.png")
+plt.show()
 
 # %%
 # # N.B.: this is different from what follows below, because it is plotting the median frac_active above a given cosine similarity cutoff, not the jointly surviving fraction
@@ -580,12 +699,6 @@ is_active_and_high_sim["significance"] = is_active_and_high_sim["pvalue"].apply(
 # compute conditional probabilities
 is_active_and_high_sim["frac_high_sim_of_active"] = is_active_and_high_sim["joint_freq"] / is_active_and_high_sim["active_freq"]
 is_active_and_high_sim["frac_active_of_high_sim"] = is_active_and_high_sim["joint_freq"] / is_active_and_high_sim["sim_freq"]
-
-# %%
-import stats
-
-importlib.reload(stats)
-from stats import compute_contingency_test, get_significance_stars, plot_stars
 
 # %%
 for sae_name in ["gemma_scope_16"]:  # ["gemma_scope_16", "matryoshka_16"]:
@@ -805,5 +918,3 @@ for sae_name in ["gemma_scope_16"]:  # ["gemma_scope_16", "matryoshka_16"]:
 #         height=300
 #     )
 # # %%
-
-# %%

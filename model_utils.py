@@ -112,20 +112,19 @@ class UDTransformer:
             _, cache = self.model.run_with_cache(
                 [sent.text for sent in batch["sentences"]],
                 stop_at_layer=layer_idx+1,
-                names_filter=f"blocks.{layer_idx}.hook_resid_pre"
+                names_filter=f"blocks.{layer_idx}.hook_resid_post"
             )
 
         # Get states for the target layer
-        states = cache[f"blocks.{layer_idx}.hook_resid_pre"]  # size [batch, seq_len, hidden_dim]
-
+        states = cache[f"blocks.{layer_idx}.hook_resid_post"]  # size [batch, seq_len, hidden_dim]
         del cache
         torch.cuda.empty_cache()
+
 
         trimmed_padded_states = torch.zeros(
                 states.size(0), batch["max_tokens"], states.size(2),
                 device=states.device
             )
-
         for i_sent, token_mask in enumerate(token_masks):
             # each token mask should be an integer tensor of size [num_tokens]
             # trimmed_padded_states[i_sent, :token_mask.sum()] = states[i_sent, :token_mask.size(0)][token_mask]  # if boolean
