@@ -70,13 +70,13 @@ dev_data = UDDataset("data/UD_English-EWT/en_ewt-ud-dev.conllu", max_sentences=1
 # %%
 train_loader = DataLoader(
     train_data,
-    batch_size=64,
+    batch_size=512,
     shuffle=True,
     collate_fn=lambda x: collate_fn(x)
 )
 dev_loader = DataLoader(
     dev_data,
-    batch_size=64,
+    batch_size=512,
     collate_fn=lambda x: collate_fn(x)
 )
 
@@ -162,7 +162,7 @@ with open(model_path, "rb") as f:
 test_data = UDDataset("data/UD_English-EWT/en_ewt-ud-test.conllu", max_sentences=1024)
 test_loader = DataLoader(
     test_data,
-    batch_size=128,
+    batch_size=512,
     collate_fn=collate_fn
 )
 
@@ -369,7 +369,7 @@ for sae_name, sae_vals in sae_comp.items():
     #     top_latents = get_top_latents_per_dep(sae_vals["dec_similarities"], list(frequent_deps.keys()), n_top)
     #     stats = plot_precision_recall(results_df, top_latents=top_latents, save_path=f"figures/sae/{which_sae}/top_{n_top}latents_evaluation_{model_name}.png")
     # else:
-    results_df, stats = evaluate_top_latents_main(
+    class_results, act_results, stats = evaluate_top_latents_main(
         ud_model=ud_model,
         train_loader=train_loader,
         test_loader=test_loader,
@@ -383,7 +383,8 @@ for sae_name, sae_vals in sae_comp.items():
         stop_layer=sae_vals["n_layers"]
     )
 
-    sae_vals["results_df"] = results_df
+    sae_vals["class_results"] = class_results
+    sae_vals["act_results"] = act_results
     sae_vals["stats"] = stats
 
 # %%

@@ -201,10 +201,7 @@ def plot_precision_recall(
     """
     fig, axs = plt.subplots(2, 2, figsize=(15, 12))
 
-    print(np.unique(results_df["dependency"]))
-
     plot_df = results_df[results_df["support"] > 0]
-    print(np.unique(plot_df["dependency"]))
     plot_df["id"] = plot_df['dependency'].astype(str) + '_' + plot_df['layer'].astype(str) + '_' + plot_df['latent'].astype(str)
 
     top_latents_ids = ['_'.join([dep_type, str(layer), str(latent)]) for dep_type, latents in top_latents.items() for layer, latent in latents]
@@ -298,7 +295,7 @@ def main(
     top_latents = get_top_latents_per_dep(similarities, frequent_deps, n_top)
 
     # Evaluate on test set
-    results_df = evaluate_all_latents(
+    class_results, act_results = evaluate_all_latents(
             ud_model=ud_model,
             train_loader=train_loader,
             test_loader=test_loader,
@@ -310,15 +307,18 @@ def main(
         )
 
     # save the results
-    fpath = f"data/sae/{which_sae}/top_latents_evaluation_{model_name}.parquet"
+    fpath = f"data/sae/{which_sae}/class_results_{model_name}.parquet"
     os.makedirs(os.path.dirname(fpath), exist_ok=True)
-    results_df.to_parquet(fpath)
+    class_results.to_parquet(fpath)
+    act_results.to_parquet(fpath.replace("class", "acts"))
 
-    stats = plot_precision_recall(results_df, top_latents=top_latents, save_path=f"figures/sae/{which_sae}/top_{n_top}_latents_evaluation_{model_name}.png")
+    stats = {}
+    for results_df, which_class in zip([class_results, act_results], ["class", "acts"]):
+        stats[which_class] = plot_precision_recall(results_df, top_latents=top_latents, save_path=f"figures/sae/{which_sae}/top_{n_top}_{which_class}_evaluation_{model_name}.png")
     with open(f"data/sae/{which_sae}/stats_{model_name}.pkl", "wb") as f:
         pickle.dump(stats, f)
 
-    return results_df, stats
+    return class_results, act_results, stats
 
 
 def evaluate_all_latents(
@@ -330,8 +330,8 @@ def evaluate_all_latents(
     device: torch.device,
     start_layer: int = 4,
     stop_layer: int = 9,
-    learning_rate: float = 1e-3,
-    num_epochs: int = 5,
+    learning_rate: float = 1e-2,
+    num_epochs: int = 10,
     batch_size: int = 1024
 ) -> pd.DataFrame:
     """Evaluate precision/recall of ALL latents using parallel probe training.
@@ -351,7 +351,10 @@ def evaluate_all_latents(
     """
 
     columns = ['setname', 'dependency', 'layer', 'latent', 'precision', 'recall', 'f1', 'support', 'true_positives', 'false_positives', 'false_negatives']
-    results = pd.DataFrame(columns=columns)
+    # class_results = pd.DataFrame(columns=columns)
+    # act_results = pd.DataFrame(columns=columns)
+    class_list = []
+    act_list = []
     entity = "adam-lowet-harvard-university"
     project = "batch-topk-matryoshka"
     sae_release = "gemma-scope-2b-pt-res-canonical"
@@ -360,64 +363,63 @@ def evaluate_all_latents(
     dep_table = DependencyTask.dependency_table()
     dep_indices = [dep_table[dep] for dep in frequent_deps]
 
-    # class ParallelProbe(nn.Module):
-    #     def __init__(self, d_sae):
-    #         super().__init__()
-    #         # Initialize with very small random values to avoid numerical issues
-    #         self.weights = nn.Parameter(torch.randn(d_sae) * 0.001)
-    #         self.biases = nn.Parameter(torch.zeros(d_sae))
+    class ParallelProbe(nn.Module):
+        def __init__(self, d_sae):
+            super().__init__()
+            # Initialize with very small random values to avoid numerical issues
+            self.weights = nn.Parameter(torch.randn(d_sae) * 0.01)
+            self.biases = nn.Parameter(torch.zeros(d_sae))
 
-    #     def forward(self, x):  # x: [batch_size, d_sae]
-    #         # Parallel logistic regression for all latents
-    #         # Returns: [batch_size, d_sae]
-    #         logits = x * self.weights.unsqueeze(0) + self.biases.unsqueeze(0)
-    #         return torch.sigmoid(logits)
+        def forward(self, x):  # x: [batch_size, d_sae]
+            # Parallel logistic regression for all latents
+            # Returns: [batch_size, d_sae]
+            logits = x * self.weights.unsqueeze(0) + self.biases.unsqueeze(0)
+            return torch.sigmoid(logits)
 
-    #     def compute_loss(self, x, y):
-    #         """Compute BCE loss using the logits directly to avoid numerical issues.
+        def compute_loss(self, x, y):
+            """Compute BCE loss using the logits directly to avoid numerical issues.
 
-    #         Args:
-    #             x: Input tensor [batch_size, d_sae]
-    #             y: Target tensor [batch_size]
+            Args:
+                x: Input tensor [batch_size, d_sae]
+                y: Target tensor [batch_size]
 
-    #         Returns:
-    #             loss: Total loss
-    #         """
-    #         # Check for NaN or Inf in inputs
-    #         if torch.isnan(x).any() or torch.isinf(x).any():
-    #             print(f"Warning: NaN or Inf in input activations")
-    #             # Replace NaN/Inf with zeros
-    #             x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+            Returns:
+                loss: Total loss
+            """
 
-    #         # Check for extreme values in activations
-    #         max_val = x.abs().max().item()
-    #         if max_val > 100:
-    #             print(f"Warning: Large activation values detected: {max_val}")
-    #             # Scale down if values are too large
-    #             x = x / (max_val / 10.0)
+            # Compute logits directly with gradient clipping
+            logits = x * self.weights.unsqueeze(0) + self.biases.unsqueeze(0)  # [batch_size, d_sae]
+            logits = logits.unsqueeze(1)  # [batch_size, 1, d_sae], where 1 is the class dimension
 
-    #         # Compute logits directly with gradient clipping
-    #         logits = x * self.weights.unsqueeze(0) + self.biases.unsqueeze(0)  # [batch_size, d_sae]
-    #         logits = logits.unsqueeze(1)  # [batch_size, 1, d_sae], where 1 is the class dimension
-    #         logits = torch.clamp(logits, min=-10.0, max=10.0)  # Prevent extreme values
+            n_pos = y.sum().item()
+            n_total = y.shape[0]
+            n_neg = n_total - n_pos
+            if n_pos == 0:
+                print(y)
+                print(y.sum())
+                raise Exception(f"No positive examples found for dependency {dep_type}")
+            if n_neg == 0:
+                print(y)
+                print(y.sum())
+                raise Exception(f"No negative examples found for dependency {dep_type}")
 
-    #         n_pos = y.sum().item()
-    #         n_total = y.shape[0]
-    #         n_neg = n_total - n_pos
+            # Expand y to match logits dimensions [batch_size, 1, d_sae]
+            y = y.unsqueeze(1).unsqueeze(2).expand(logits.size(0), logits.size(1), logits.size(2))
 
-    #         # Expand y to match logits dimensions [batch_size, 1, d_sae]
-    #         y = y.unsqueeze(1).unsqueeze(2).expand(logits.size(0), logits.size(1), logits.size(2))
+            # Use BCEWithLogitsLoss which is more numerically stable
+            loss = F.binary_cross_entropy_with_logits(logits, y, pos_weight=torch.tensor([[[n_neg/n_pos]]]).to(device), reduction='none')
 
-    #         # Use BCEWithLogitsLoss which is more numerically stable
-    #         loss = F.binary_cross_entropy_with_logits(logits, y, pos_weight=torch.tensor([[[n_neg/n_pos]]]).to(device), reduction='none')
+            if loss.isnan().sum() > 0:
+                print(n_pos, n_neg)
+                print(logits.isnan().sum())
+                print(y.isnan().sum())
+                print(logits.min(), logits.max())
+                print(y.min(), y.max())
+                # print(loss)
+                # raise Exception(f"NaN in loss for dependency {dep_type}")
 
-    #         # Check for NaN in loss
-    #         if torch.isnan(loss).any():
-    #             print(f"Warning: NaN in loss computation")
-    #             loss = torch.nan_to_num(loss, nan=0.0)
-
-    #         # Average over batch dimension first, then sum over latents
-    #         return loss.mean(dim=0).sum()
+            # Average over batch dimension first, then sum over latents
+            return loss.mean(dim=0).sum()
 
     # Process each layer
     for layer in tqdm(range(start_layer, stop_layer), desc="Processing layers"):
@@ -432,120 +434,130 @@ def evaluate_all_latents(
         d_sae = sae.W_enc.shape[1]  # Get number of latents
 
         # Initialize parallel probes for each dependency type
-        # probes = {dep_type: ParallelProbe(d_sae).to(device) for dep_type in frequent_deps}
-        # optimizers = {dep_type: torch.optim.Adam(probes[dep_type].parameters(), lr=learning_rate) for dep_type in frequent_deps}
+        probes = {dep_type: ParallelProbe(d_sae).to(device) for dep_type in frequent_deps}
+        optimizers = {dep_type: torch.optim.Adam(probes[dep_type].parameters(), lr=learning_rate) for dep_type in frequent_deps}
 
 
         for setname, loader, n_epochs in [("train", train_loader, num_epochs), ("test", test_loader, 1)]:
 
             # Initialize counters for both train and test sets
             dep_counters = {
-                dep_type: {
-                    "TP": np.zeros(d_sae, dtype=np.int16),
-                    "FP": np.zeros(d_sae, dtype=np.int16),
-                    "FN": np.zeros(d_sae, dtype=np.int16),
+                which_class_name: {
+                    dep_type: {
+                        "TP": np.zeros(d_sae, dtype=np.int16),
+                        "FP": np.zeros(d_sae, dtype=np.int16),
+                        "FN": np.zeros(d_sae, dtype=np.int16),
                         "total": 0
                     } for dep_type in frequent_deps
-                }
+                } for which_class_name in ["class", "acts"]
+            }
 
-            # # Process each epoch
-            # for epoch in range(n_epochs):
+            # Process each epoch
+            for epoch in range(n_epochs):
 
-            #     total_losses = {dep_type: 0 for dep_type in frequent_deps}
+                total_losses = {dep_type: 0 for dep_type in frequent_deps}
 
-            # Process each batch
-            for batch_idx, batch in tqdm(enumerate(loader), desc=f"Layer {layer} batches"):
+                # Process each batch
+                for batch_idx, batch in tqdm(enumerate(loader), desc=f"Layer {layer} batches"):
 
-                # Get ground truth relations
-                relations = batch["relations"]  # [batch, seq_len, num_relations]
+                    # Get ground truth relations
+                    # NOTE: THERE ARE NANS HERE! MUST STRIP THESE OUT!!!
+                    relations = batch["relations"][..., dep_indices]  # [batch, seq_len, num_relations]
+                    relations = relations[batch["relation_mask"]].to(device)  # [n_tokens, num_relations]
+                    tail_before_head = relations.isnan()
 
-                relations = relations[batch["relation_mask"]].to(device)  # [n_tokens, num_relations]
-                # Get activations
-                activations = ud_model.get_activations(batch, layer)  # [batch, seq_len, d_model]
-                activations = activations[batch["relation_mask"]]  # [n_tokens, d_model]
-                # Get SAE latent activations for this batch
-                latent_acts = sae.encode(activations).squeeze().detach()  # [n_tokens, d_sae]
-                for dep_idx, dep_type in enumerate(frequent_deps):
-                    # if setname == "train":
-                    #     train_labels = relations[:, dep_idx].float()  # [n_tokens]
-                    #     if train_labels.sum() == 0:
-                    #         continue
+                    # Get activations
+                    activations = ud_model.get_activations(batch, layer)  # [batch, seq_len, d_model]
+                    activations = activations[batch["relation_mask"]]  # [n_tokens, d_model]
 
-                    #     probes[dep_type].train()
-                    #     optimizers[dep_type].zero_grad()
-                    #     loss = probes[dep_type].compute_loss(latent_acts, train_labels)
-                    #     loss.backward()
-                    #     optimizers[dep_type].step()
-                    #     total_losses[dep_type] += loss.item()
+                    # Get SAE latent activations for this batch
+                    latent_acts = sae.encode(activations).squeeze().detach()  # [n_tokens, d_sae]
+                    for dep_idx, dep_type in enumerate(frequent_deps):
 
-                    #     if batch_idx == len(loader) - 1:
-                    #         print(f"Layer {layer}, {dep_type}, epoch {epoch}: loss = {loss.item():.4f}")
+                        if setname == "train":
 
-                    # if epoch == num_epochs - 1:
+                            train_labels = relations[:, dep_idx][~tail_before_head[:, dep_idx]].float()  # [n_tokens]
+                            if train_labels.sum() == 0:
+                                continue  # Skip this batch if no positive examples
 
-                    # Get ground truth for this dependency
-                    dep_mask = relations[:, dep_indices[dep_idx]].bool()  # [n_tokens]
+                            probes[dep_type].train()
+                            optimizers[dep_type].zero_grad()
+                            loss = probes[dep_type].compute_loss(latent_acts[~tail_before_head[:, dep_idx]], train_labels)
+                            loss.backward()
+                            optimizers[dep_type].step()
+                            total_losses[dep_type] += loss.item()
 
-                    # batch_acts = probes[dep_type](latent_acts) > 0.5  # [n_tokens, d_sae]
-                    batch_acts = latent_acts > 0  # [n_tokens, d_sae]
 
-                    # Compute TP, FP, FN for each latent in the batch
-                    # For each latent, we have a binary prediction for each token
-                    tp = torch.sum(batch_acts & dep_mask.unsqueeze(1), dim=0).cpu().numpy()
-                    fp = torch.sum(batch_acts & ~dep_mask.unsqueeze(1), dim=0).cpu().numpy()
-                    fn = torch.sum(~batch_acts & dep_mask.unsqueeze(1), dim=0).cpu().numpy()
+                        if epoch == n_epochs - 1:
 
-                    # Update counters
-                    dep_counters[dep_type]["TP"] += tp
-                    dep_counters[dep_type]["FP"] += fp
-                    dep_counters[dep_type]["FN"] += fn
-                    dep_counters[dep_type]["total"] += dep_mask.sum().item()
+                            # Get ground truth for this dependency
+                            dep_mask = relations[:, dep_idx][~tail_before_head[:, dep_idx]].bool()  # [n_tokens], excl. nan
 
-        #     # Compute metrics for all latents in this layer
-        #     layer_results = compute_metrics_for_layer(dep_counters, layer, frequent_deps)
-        #     results = pd.concat([results, layer_results], axis=0, ignore_index=True)
-        #     gc.collect()
-        #     torch.cuda.empty_cache()
+                            batch_class = probes[dep_type](latent_acts[~tail_before_head[:, dep_idx]]) > 0.5  # [n_tokens, d_sae]
+                            batch_acts = latent_acts[~tail_before_head[:, dep_idx]] > 0  # [n_tokens, d_sae], excl. nan
 
-        # del sae, dep_counters
-            if dep_counters["ccomp"]["total"] == 0:
+                            for which_class, which_class_name in [(batch_class, "class"), (batch_acts, "acts")]:
+                                # Compute TP, FP, FN for each latent in the batch
+                                # For each latent, we have a binary prediction for each token
+                                tp = torch.nansum(which_class & dep_mask.unsqueeze(1), dim=0).cpu().numpy()
+                                fp = torch.nansum(which_class & ~dep_mask.unsqueeze(1), dim=0).cpu().numpy()
+                                fn = torch.nansum(~which_class & dep_mask.unsqueeze(1), dim=0).cpu().numpy()
+
+                                # Update counters
+                                dep_counters[which_class_name][dep_type]["TP"] += tp
+                                dep_counters[which_class_name][dep_type]["FP"] += fp
+                                dep_counters[which_class_name][dep_type]["FN"] += fn
+                                dep_counters[which_class_name][dep_type]["total"] += dep_mask.sum().item()
+
+            if dep_counters["class"]["ccomp"]["total"] == 0:
                 raise Exception(f"No ccomp dependencies found for layer {layer}")
 
-            layer_results = pd.DataFrame(columns=columns)
-            for dep_type, counters in dep_counters.items():
-                tp = counters["TP"]
-                fp = counters["FP"]
-                fn = counters["FN"]
-                total = np.int16(counters["total"])
+            if setname == "train":
+                print(total_losses)
 
-                # Compute precision, recall, F1
-                precision = np.divide(tp, tp + fp, out=np.zeros_like(tp, dtype=np.float32), where=(tp + fp) > 0)
-                recall = np.divide(tp, tp + fn, out=np.zeros_like(tp, dtype=np.float32), where=(tp + fn) > 0)
-                f1 = np.divide(2 * precision * recall, precision + recall,
-                            out=np.zeros_like(precision, dtype=np.float32),
-                            where=(precision + recall) > 0)
+            for which_class_name, results_list in zip(dep_counters.keys(), [class_list, act_list]):
+                layer_results = pd.DataFrame(columns=columns)
+                for dep_type, counters in dep_counters[which_class_name].items():
+                    tp = counters["TP"]
+                    fp = counters["FP"]
+                    fn = counters["FN"]
+                    total = np.int16(counters["total"])
 
-                # Add to results
-                tmp = pd.DataFrame(data=dict(zip(columns, [repeat(setname, d_sae), repeat(dep_type, d_sae), repeat(layer, d_sae), np.arange(d_sae), precision, recall, f1, repeat(total, d_sae), tp, fp, fn])))
-                if layer_results.empty:
-                    layer_results = tmp
-                else:
-                    layer_results = pd.concat([layer_results, tmp], axis=0, ignore_index=True)
+                    # Compute precision, recall, F1
+                    precision = np.divide(tp, tp + fp, out=np.zeros_like(tp, dtype=np.float32), where=(tp + fp) > 0)
+                    recall = np.divide(tp, tp + fn, out=np.zeros_like(tp, dtype=np.float32), where=(tp + fn) > 0)
+                    f1 = np.divide(2 * precision * recall, precision + recall,
+                                out=np.zeros_like(precision, dtype=np.float32),
+                                where=(precision + recall) > 0)
 
-            del dep_counters
-            gc.collect()
-            torch.cuda.empty_cache()
-            if results.empty:
-                results = layer_results
-            else:
-                results = pd.concat([results, layer_results], axis=0, ignore_index=True)
+                    # Add to results
+                    tmp = pd.DataFrame(data=dict(zip(columns, [repeat(setname, d_sae), repeat(dep_type, d_sae), repeat(np.int8(layer), d_sae), np.arange(d_sae, dtype=np.int16), precision, recall, f1, repeat(total, d_sae), tp, fp, fn])))
+                    if layer_results.empty:
+                        layer_results = tmp
+                    else:
+                        layer_results = pd.concat([layer_results, tmp], axis=0, ignore_index=True)
+
+                results_list.append(layer_results)
+                # if df.empty:
+                #     df = layer_results
+                # else:
+                #     df = pd.concat([df, layer_results], axis=0, ignore_index=True)
+
+        print(len(class_list), len(act_list))
+
         # Cleanup
-        # del sae, probes, optimizers, train_labels
-        del sae
+        del sae, probes, optimizers, train_labels, dep_counters
         gc.collect()
         torch.cuda.empty_cache()
 
-    results["setname"] = results["setname"].astype("category")
-    results["dependency"] = results["dependency"].astype("category")
+    class_results = pd.concat(class_list, axis=0, ignore_index=True)
+    act_results = pd.concat(act_list, axis=0, ignore_index=True)
 
-    return results
+    for df in [class_results, act_results]:
+        df["setname"] = df["setname"].astype("category")
+        df["dependency"] = df["dependency"].astype("category")
+
+    print(class_results.dtypes)
+    print(act_results.dtypes)
+
+    return class_results, act_results
