@@ -91,17 +91,16 @@ class UDTransformer:
         return final_model_token_masks
 
 
-    def get_activations(self, batch: Dict, layer_idx: int, train_toks: str = "tail") -> torch.Tensor:
+    def get_activations(self, batch: Dict, layer_idx: int) -> torch.Tensor:
         """Get aligned token-level embeddings.
 
         Args:
             batch: Batch of token sequences
             layer_idx: Layer index to get embeddings from
-            train_toks: Which tokens to use (tail, head, first, last)
 
         Returns:
             Tensor of shape [batch, seq_len, hidden_dim] containing embeddings
-            aligned with the original tokens/dependencies
+            aligned with the original tokens/dependencies.
         """
 
         # Get encodings for all sentences

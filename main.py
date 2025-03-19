@@ -4,7 +4,6 @@ import os
 import pickle
 import sys
 from datetime import datetime
-
 import einops
 from rich import print as rprint
 from rich.table import Table
@@ -29,8 +28,10 @@ from analyze_sae import *
 # from analyze_sae import main as analyze_sae_main
 from darkmatter import main as dm_main
 from data_utils import collate_fn
+
 # from evaluate import main as evaluate_main
 from evaluate_merged import main as evaluate_merged_main
+from evaluate_merged import plot_layer_results
 from load_data import UDDataset
 from model_utils import UDTransformer
 from scipy import stats
@@ -40,13 +41,19 @@ import sae
 from config import post_init_cfg
 from logs import load_checkpoint
 from nonsparse import *
+
 # from probing import train_probe
 from probing_merged import train_probe
-from stats import compute_contingency_test, get_significance_stars, plot_stars
+from stats import compute_contingency_test, get_significance_stars
+from plotting import plot_correlations, plot_stars, hide_spines
 
 importlib.reload(sae)
 from activation_store import ActivationsStore
-from evaluate_top_latents import get_top_latents_per_dep
+from evaluate_top_latents import (
+    evaluate_latent_predictions,
+    get_top_latents_per_dep,
+    plot_precision_recall,
+)
 from evaluate_top_latents import main as evaluate_top_latents_main
 from sae import BatchTopKSAE, GlobalBatchTopKMatryoshkaSAE
 from sae_lens import SAE, ActivationsStore
@@ -59,9 +66,18 @@ from transformer_lens import HookedTransformer
 from utils import load_sae_from_wandb
 from wandb import CommError
 
+from sae_bench.evals.autointerp.eval_config import AutoInterpEvalConfig
+from sae_bench.evals.autointerp.main import run_eval
+
 # %% Set up devices
 # For now, we're using a single GPU, but in future, could add an option for UDTransformer and SAE to live on different devices
-device_model = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+device_model = torch.device(
+    "mps"
+    if torch.backends.mps.is_available()
+    else "cuda"
+    if torch.cuda.is_available()
+    else "cpu"
+)
 device_sae = device_model
 
 
@@ -70,7 +86,18 @@ train_data = UDDataset("data/UD_English-EWT/en_ewt-ud-train.conllu", max_sentenc
 dev_data = UDDataset("data/UD_English-EWT/en_ewt-ud-dev.conllu", max_sentences=1024)
 
 # %%
-sentence_batch_size = 32 if str(torch.cuda.mem_get_info()[1]).startswith("20") else 512
+# Initialize model
+ud_model = UDTransformer(model_name="gemma-2-2b", device=device_model)
+
+# %%
+import data_utils, task
+importlib.reload(data_utils)
+importlib.reload(task)
+from data_utils import collate_fn
+from task import DependencyTask
+
+sentence_batch_size = 32 if torch.cuda.is_available() and str(torch.cuda.mem_get_info()[1]).startswith("20") else 1024
+# sentence_batch_size = 256
 
 train_loader = DataLoader(
     train_data,
@@ -85,20 +112,20 @@ dev_loader = DataLoader(
 )
 
 # %%
-# Initialize model
-ud_model = UDTransformer(model_name="gemma-2-2b", device=device_model)
 
-# %%
-probe_type = "binary"  # "multiclass" or "binary"
-train_toks = "tail"
-which_pos = "trail"
+probe_type = "multiclass"  # "multiclass" or "binary"
+max_layer = 26  # have only trained binary probes up to this layer for now
+
+
+train_toks = "concat"
 min_occurrences = 20
 deps = DependencyTask.dependency_table()
 dep_counts = DependencyTask.count_dependencies(train_data)
 
+
 # for train_toks in ["last","head"]:
-model_name = f"{probe_type}_{train_toks}_{which_pos}_min_{min_occurrences}"
-model_path = f"data/probes/{model_name}.pkl"
+model_name = f"{probe_type}_{train_toks}_min_{min_occurrences}"
+model_path = f"data/probes/{model_name}_layer_{max_layer - 1}.pkl"
 start_time = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 print("Run group:", start_time)
 
@@ -119,67 +146,47 @@ for rel, count in sorted(dep_counts.items(), key=lambda x: x[1], reverse=True):
 
 
 # %%
-# # Load already trained probes
-# with open(model_path, "rb") as f:
-#     probes = pickle.load(f)
+import probing_merged
+importlib.reload(probing_merged)
+from probing_merged import train_probe
+
+# Load already trained probes
+if os.path.exists(model_path):
+    with open(model_path, "rb") as f:
+        probes = pickle.load(f)
+else:
+    print(f"Probes not found at {model_path}, training new probes")
+
+    # Train probes for different layers
+    # Note this is inefficient in that it re-runs the model (one forward pass per layer), though it stops at layer+1 each time
+    probes = {}
+    for layer in range(0, ud_model.model.cfg.n_layers):
+
+        probe = train_probe(
+            model=ud_model,
+            train_loader=train_loader,
+            dev_loader=dev_loader,
+            device=device_model,
+            layer=layer,
+            num_epochs=30,
+            train_toks=train_toks,
+            run_group=start_time,
+            frequent_deps=list(frequent_deps.keys()),
+            probe_type=probe_type
+        )
+
+        probes[layer] = probe
+        del probe
+        empty_cache()
+
+        # comment the next line out if you want to overwrite existing probes
+        # if not os.path.exists(model_path):
+        with open(model_path, "wb") as f:
+            print(f"Saving probes to {model_path}")
+            pickle.dump(probes, f)
 
 
 # %%
-# Train probes for different layers
-# Note this is inefficient in that it re-runs the model (one forward pass per layer), though it stops at layer+1 each time
-# comment this block out if you just want to load probes
-# import probing
-
-# importlib.reload(probing)
-# from probing import train_probe
-
-probes = {}
-for layer in range(ud_model.model.cfg.n_layers):
-    # Pass frequent_deps to compute_loss during training
-    # probe = train_probe(
-    #     ud_model,
-    #     train_loader,
-    #     dev_loader,
-    #     device_model,
-    #     layer=layer,
-    #     train_toks=train_toks,
-    #     run_group=start_time,
-    #     frequent_deps=list(frequent_deps.keys())
-    # )
-
-    probe = train_probe(
-        model=ud_model,
-        train_loader=train_loader,
-        dev_loader=dev_loader,
-        device=device_model,
-        layer=layer,
-        train_toks=train_toks,
-        run_group=start_time,
-        frequent_deps=list(frequent_deps.keys()),
-        probe_type="binary"
-    )
-
-    probes[layer] = probe.cpu()
-    del probe
-    empty_cache()
-    break
-
-# %%
-# examine probes
-
-# %%
-# comment the next line out if you want to overwrite existing probes
-# if not os.path.exists(model_path):
-with open(model_path, "wb") as f:
-    print(f"Saving probes to {model_path}")
-    pickle.dump(probes, f)
-
-
-# %% Evaluate
-# import evaluate_merged
-# importlib.reload(evaluate)
-# from evaluate import main as evaluate_merged_main
-
 test_data = UDDataset("data/UD_English-EWT/en_ewt-ud-test.conllu", max_sentences=1024)
 test_loader = DataLoader(
     test_data,
@@ -187,64 +194,50 @@ test_loader = DataLoader(
     collate_fn=collate_fn
 )
 
-evaluate_merged_main(
-    test_loader,
-    probes,
-    ud_model,
-    train_toks=train_toks,
-    device=device_model,
-    frequent_deps=list(frequent_deps.keys()),
-    probe_type=probe_type
+# %% Evaluate
+import evaluate_merged
+importlib.reload(evaluate_merged)
+from evaluate_merged import main as evaluate_merged_main
+
+# probe_results = evaluate_merged_main(
+#     test_loader,
+#     probes,
+#     ud_model,
+#     train_toks=train_toks,
+#     device=device_model,
+#     frequent_deps=list(frequent_deps.keys()),
+#     probe_type=probe_type,
+#     model_name=model_name
+# )
+
+# get results
+results_path = f"data/evals/{probe_type}_eval_{train_toks}_results_layers_{min(probes.keys())}-{max(probes.keys())}_ndeps_{len(frequent_deps)}.pkl"
+results_path = f"data/evals/{model_name}_eval_results_layers_{min(probes.keys())}-{max(probes.keys())}.pkl"
+probe_results = pickle.load(open(results_path, "rb"))
+
+probe_stats = plot_layer_results(
+    probe_results,
+    list(frequent_deps.keys()),
+    save_path=f"figures/evals/{probe_type}_eval_{train_toks}_results_layers_{min(probes.keys())}-{max(probes.keys())}_ndeps_{len(frequent_deps)}.svg",
 )
 
-# # %%
-# # plot the correlation matrix for probes themselves
-# probe_weights = np.array([probe.probe.weight.detach().cpu().numpy() for probe in probes.values()])
+# %%
+# plot the correlation matrix for probes themselves
+probe_weights = np.array([probe.probe.weight.detach().cpu().numpy() for probe in probes.values()])
 # print(probe_weights.shape)
-# nrows, ncols = 4, 7
-# fig, axs = plt.subplots(nrows, ncols, figsize=(21, 12))
 
-# # Create a diverging colormap that is white at zero
-# cmap = plt.cm.RdBu_r
-# norm = plt.Normalize(vmin=-1, vmax=1)
-
-# for row in range(nrows):
-#     for col in range(ncols):
-#         layer = row * ncols + col
-#         ax = axs[row, col]
-#         if layer >= ud_model.model.cfg.n_layers:
-#             ax.axis("off")
-#             continue
-#         probe_weights_layer = probe_weights[layer]
-#         probe_corrs = np.corrcoef(probe_weights_layer)
-#         im = ax.pcolormesh(probe_corrs, cmap=cmap, norm=norm)
-#         ax.set_title(f"Layer {layer}")
-#         if row == nrows - 1 and col == 0:
-#             ax.set_xticks(range(ndeps))
-#             ax.set_yticks(range(ndeps))
-#             ax.set_xticklabels(list(frequent_deps.keys()), rotation=45, ha="right")
-#             ax.set_yticklabels(list(frequent_deps.keys()))
-#         else:
-#             ax.set_xticks([])
-#             ax.set_yticks([])
-
-# # plot a single color bar out to the side
-# fig.subplots_adjust(right=0.9)
-# cbar_ax = fig.add_axes([0.93, 0.15, 0.01, 0.7])
-# fig.colorbar(im, cax=cbar_ax)
-# plt.show()
-
-
+plot_correlations(probe_weights, save_path=f"figures/evals/{probe_type}_eval_{train_toks}_probe_correlations_layers_{min(probes.keys())}-{max(probes.keys())}_ndeps_{len(frequent_deps)}.png", n_layers=ud_model.model.cfg.n_layers, ndeps=ndeps, frequent_deps=frequent_deps)
 
 # %%
 # compute activation density at each layer
 # compute alignment between probes and SAE at each layer
 
 # critical choice: gemma_scope vs. matryoshka SAE
-which_sae = "matryoshka"  # "gemma_scope" or "matryoshka" or "batch-topk"
+which_sae = "gemma_scope"  # "gemma_scope" or "matryoshka" or "batch-topk"
 pre_or_post = "resid_post" if which_sae == "gemma_scope" else "resid_pre"  # Gemma Scope hooked resid_post; the linear probes and other SAEs hooked resid_pre
 # n_sim_layers = ud_model.model.cfg.n_layers - 1
-n_sim_layers = ud_model.model.cfg.n_layers if which_sae == "gemma_scope" else ud_model.model.cfg.n_layers - 1
+# n_sim_layers = ud_model.model.cfg.n_layers if which_sae == "gemma_scope" else ud_model.model.cfg.n_layers - 1
+n_sim_layers = 26 if which_sae == "gemma_scope" else 25
 # wandb settings from Matryoshka SAE training
 entity = "adam-lowet-harvard-university"
 project = "batch-topk-matryoshka"
@@ -345,8 +338,8 @@ width = 16
 # np.save(f"data/similarities/{which_sae}/dec_similarities_width_{width}_{model_name}.npy", dec_similarities)
 # np.save(f"data/similarities/{which_sae}/enc_null_maxes_width_{width}_{model_name}.npy", enc_null_maxes)
 # np.save(f"data/similarities/{which_sae}/dec_null_maxes_width_{width}_{model_name}.npy", dec_null_maxes)
-# np.save(f"data/similarities/{which_sae}/all_frac_active_width_{width}_{model_name}.npy", all_frac_active)
-# np.save(f"data/similarities/{which_sae}/all_cfgs_width_{width}_{model_name}.npy", cfgs)
+# np.save(f"data/similarities/{which_sae}/all_frac_active_width_{width}_{model_name.replace(f'{probe_type}_', '')}.npy", all_frac_active)
+# np.save(f"data/similarities/{which_sae}/all_cfgs_width_{width}_{model_name.replace(f'{probe_type}_', '')}.npy", cfgs)
 
 
 # %%
@@ -359,10 +352,14 @@ for sae_name, sae_width in [("gemma_scope", 16), ("matryoshka", 16)]:
     max_dec_similarities = np.max(dec_similarities, axis=-1)
     enc_null_maxes = np.load(f"data/similarities/{sae_name}/enc_null_maxes_width_{sae_width}_{model_name}.npy")
     dec_null_maxes = np.load(f"data/similarities/{sae_name}/dec_null_maxes_width_{sae_width}_{model_name}.npy")
-    all_frac_active = np.load(f"data/similarities/{sae_name}/all_frac_active_width_{sae_width}_{model_name}.npy")
-    cfgs = np.load(f"data/similarities/{sae_name}/all_cfgs_width_{sae_width}_{model_name}.npy", allow_pickle=True)
+    all_frac_active = np.load(f"data/similarities/{sae_name}/all_frac_active_width_{sae_width}_{model_name.replace(f'{probe_type}_', '')}.npy")
+    cfgs = np.load(f"data/similarities/{sae_name}/all_cfgs_width_{sae_width}_{model_name.replace(f'{probe_type}_', '')}.npy", allow_pickle=True)
 
-    sae_comp['_'.join([sae_name, str(sae_width)])] = dict(enc_similarities=enc_similarities, dec_similarities=dec_similarities, all_frac_active=all_frac_active, cfgs=cfgs, max_enc_similarities=max_enc_similarities, max_dec_similarities=max_dec_similarities, enc_null_maxes=enc_null_maxes, dec_null_maxes=dec_null_maxes, n_layers=ud_model.model.cfg.n_layers if sae_name == "gemma_scope" else ud_model.model.cfg.n_layers - 1, start_layer=0 if sae_name == "gemma_scope" else 1)
+    sae_comp['_'.join([sae_name, str(sae_width)])] = dict(
+        enc_similarities=enc_similarities, dec_similarities=dec_similarities,
+        all_frac_active=all_frac_active, cfgs=cfgs,
+        max_enc_similarities=max_enc_similarities, max_dec_similarities=max_dec_similarities, enc_null_maxes=enc_null_maxes, dec_null_maxes=dec_null_maxes,
+        n_layers=len(cfgs), start_layer=0 if sae_name == "gemma_scope" else 1)
 
 # %%
 # Compute precision, recall and F1 scores for each latent and plot for top latents
@@ -377,37 +374,214 @@ from evaluate_top_latents import (
     main as evaluate_top_latents_main
 )
 
-# Get top 2 simlarities and their indices
-n_top = 1000
+which_class_names = ["acts"]
+return_class = False
 
 for sae_name, sae_vals in sae_comp.items():
 
     which_sae = '_'.join(sae_name.split('_')[:-1])
-    fpath = f"data/sae/{which_sae}/top_latents_evaluation_{model_name}.parquet"
-    # if os.path.exists(fpath):
-    #     results_df = pd.read_parquet(fpath)
-    #     # with open(f"data/sae/{which_sae}/stats_{model_name}.pkl", "rb") as f:
-    #     #     stats = pickle.load(f)
-    #     top_latents = get_top_latents_per_dep(sae_vals["dec_similarities"], list(frequent_deps.keys()), n_top)
-    #     stats = plot_precision_recall(results_df, top_latents=top_latents, save_path=f"figures/sae/{which_sae}/top_{n_top}latents_evaluation_{model_name}.png")
-    # else:
-    class_results, act_results, stats = evaluate_top_latents_main(
-        ud_model=ud_model,
-        train_loader=train_loader,
-        test_loader=test_loader,
-        similarities=sae_vals["dec_similarities"],
-        frequent_deps=list(frequent_deps.keys()),
-        n_top=n_top,
-        which_sae=which_sae,
-        device=device_sae,
-        model_name=model_name,
-        start_layer=0,
-        stop_layer=sae_vals["n_layers"]
-    )
+    fpath = f"data/sae/{which_sae}/acts_results_{model_name}.parquet"
+    if os.path.exists(fpath):
+        acts_results = pd.read_parquet(fpath)
+        class_results = pd.read_parquet(fpath.replace("acts_results", "class_results"))
+        with open(f"data/sae/{which_sae}/stats_{model_name}.pkl", "rb") as f:
+            stats = pickle.load(f)
+        # stats = {}
+        # # for results_df, which_class in zip([acts_results, class_results], ["acts", "class"]):
+        # for results_df, which_class in zip([acts_results], ["acts"]):
+        #     stats[which_class] = plot_precision_recall(results_df, save_path=f"figures/sae/{which_sae}/{which_class}_evaluation_{model_name}.svg")
+        # with open(f"data/sae/{which_sae}/stats_{model_name}.pkl", "wb") as f:
+        #     pickle.dump(stats, f)
 
-    sae_vals["class_results"] = class_results
-    sae_vals["act_results"] = act_results
+    else:
+    # if True:
+        acts_results, stats = evaluate_top_latents_main(
+            ud_model=ud_model,
+            train_loader=train_loader,
+            test_loader=test_loader,
+            similarities=sae_vals["dec_similarities"],
+            frequent_deps=list(frequent_deps.keys()),
+            which_sae=which_sae,
+            device=device_sae,
+            model_name=model_name,
+            start_layer=0,
+            stop_layer=sae_vals["n_layers"],
+            return_class=return_class
+        )
+
+    # sae_vals["class_results"] = class_results
+    sae_vals["act_results"] = acts_results
     sae_vals["stats"] = stats
+
+# %%
+# In each layer, take the max F1 latents we identified and plot their correlation matrix
+
+# entity = "adam-lowet-harvard-university"
+# project = "batch-topk-matryoshka"
+# sae_release = "gemma-scope-2b-pt-res-canonical"
+# width = 16
+
+# for sae_name, sae_vals in sae_comp.items():
+#     print(sae_name)
+#     which_sae = '_'.join(sae_name.split('_')[:-1])
+#     df = sae_vals["stats"]["acts"]["max_test"]
+
+#     for i_layer, layer in enumerate(range(sae_vals["start_layer"], sae_vals["n_layers"])):
+#         print(f"Layer {layer}")
+
+#         latents = df[df["layer"] == i_layer]["latent"]
+#         deps = df[df["layer"] == i_layer]["dependency"].astype(str)
+
+#         uarr, ucounts = np.unique(latents, return_counts=True)
+#         if len(uarr) != ndeps:
+#             print(f"Layer {layer} has {len(uarr)} latents, but {ndeps} dependencies. Duplicate latent is {uarr[np.argmax(ucounts)]}, spanning dependencies {', '.join(deps[latents == uarr[np.argmax(ucounts)]].values)}")
+
+#         if which_sae == "gemma_scope":
+#             sae_id = f"layer_{layer}/width_{width}k/canonical"
+#             sae = SAE.from_pretrained(sae_release, sae_id, device=str(device_sae))[0]
+#         elif which_sae == "matryoshka":
+#             sae_id = f"gemma-2-2b_blocks.{layer + 1}.hook_resid_pre_36864_global-matryoshka-topk_32_0.0003_122069"
+#             sae, cfg = load_sae_from_wandb(f"{entity}/{project}/{sae_id}:latest", GlobalBatchTopKMatryoshkaSAE)
+
+#         dec_dirs = sae.W_dec[latents.values, :].detach().cpu().numpy()
+#         if "dec_dirs" not in sae_vals:
+#             sae_vals["dec_dirs"] = np.zeros((sae_vals["n_layers"], ndeps, dec_dirs.shape[1]))
+#         sae_vals["dec_dirs"][i_layer] = dec_dirs
+
+#     plot_correlations(sae_vals["dec_dirs"], save_path=f"figures/sae/{which_sae}/dec_dirs_layer_{layer}.png", n_layers=sae_vals["n_layers"], ndeps=ndeps, frequent_deps=frequent_deps)
+
+# %%
+# Compare F1 scores for Gemma Scope vs. Matryoshka
+norm = plt.Normalize(vmin=-1, vmax=1)
+fig, axs = plt.subplots(1, 3, figsize=(18, 4))
+
+for ax, stat in zip(axs.flat, ["f1", "precision", "recall"]):
+    f1_diff = sae_comp["matryoshka_16"]["stats"]["acts"][stat] - sae_comp["gemma_scope_16"]["stats"]["acts"][stat][:-1].reset_index(drop=True)
+    sns.heatmap(f1_diff, cmap="RdBu_r", norm=norm, xticklabels=list(frequent_deps.keys()), yticklabels=np.arange(sae_comp["matryoshka_16"]["n_layers"]), ax=ax)
+    # ax.set_yticks(np.arange(.5, sae_comp["matryoshka_16"]["n_layers"]), np.arange(sae_comp["matryoshka_16"]["start_layer"], sae_comp["matryoshka_16"]["start_layer"] + sae_comp["matryoshka_16"]["n_layers"]), rotation=0)
+    ax.set_title(f"{stat.capitalize()} Score for Matryoshka $-$ Gemma Scope SAE")
+plt.savefig(f"figures/sae/f1_diff_matryoshka_gemma_scope_{model_name}.svg", bbox_inches="tight")
+plt.show()
+
+# %%
+# plot as a bar chart layer 12
+plot_layer = 12
+
+eval_df = pd.DataFrame({k: v for k, v in probe_results[plot_layer].items() if k not in ["probs", "accuracy"]})
+eval_df["dependency"] = frequent_deps.keys()
+eval_df["sae"] = "probe"
+
+for sae_name, sae_vals in sae_comp.items():
+    which_sae = '_'.join(sae_name.split('_')[:-1])
+    layer_df = sae_vals["stats"]["acts"]["max_test"]
+    layer_df = layer_df[layer_df["layer"] == plot_layer]
+    layer_df["sae"] = which_sae
+    eval_df = pd.concat([eval_df, layer_df[eval_df.columns]])
+eval_df = eval_df.reset_index(drop=True)
+
+# select only the 10 most frequent dependencies, which are the values in frequent_deps
+top_deps = {k: v for k, v in sorted(frequent_deps.items(), key=lambda x: x[1], reverse=True)[:10]}
+eval_df = eval_df[eval_df["dependency"].isin(top_deps.keys())].sort_values(by="f1", ascending=False)
+
+fig = plt.figure(figsize=(10, 4))
+ax = sns.barplot(data=eval_df, x="dependency", y="f1", hue="sae")
+ax.set_xticklabels(ax.get_xticklabels(), rotation=90)
+plt.savefig(f"figures/sae/f1_bar_chart_layer_{plot_layer}_{model_name}.svg", bbox_inches="tight")
+plt.show()
+
+
+# %%
+# Compare F1 scores for linear probes vs. SAEs
+# with open(f"data/evals/{probe_type}_eval_{train_toks}_results_layers_{min(probes.keys())}-{max(probes.keys())}_ndeps_{len(frequent_deps)}.pkl", "rb") as f:
+#     eval_results = pickle.load(f)
+probe_f1_matrix = np.array([probe_results[layer]["f1"] for layer in probe_results.keys()])
+
+cmap = plt.cm.RdBu_r
+norm = plt.Normalize(vmin=-1, vmax=1)
+
+for which_class_name in ["acts"]:  # "class",
+
+    fig, axs = plt.subplots(1, 2, figsize=(12, 4))
+    for i_ax, (sae_name, sae_vals) in enumerate(sae_comp.items()):
+
+        which_sae = '_'.join(sae_name.split('_')[:-1])
+        f1_diff = probe_f1_matrix[:max_layer - sae_vals["start_layer"]] - sae_vals["stats"][which_class_name]["f1"]
+
+        sns.heatmap(f1_diff, cmap="RdBu_r", norm=norm, xticklabels=list(frequent_deps.keys()), yticklabels=np.arange(sae_vals["start_layer"], sae_vals["start_layer"] + sae_vals["n_layers"]), ax=axs[i_ax])
+        axs[i_ax].set_title(f"{probe_type.capitalize()} Probe $-$ {sae_name.capitalize()} SAE {which_class_name} F1")
+
+    plt.savefig(f"figures/sae/f1_diff_probe_sae_{which_sae}_{which_class_name}.svg", bbox_inches="tight")
+    plt.show()
+
+    # f1_diff = sae_vals["stats"]["class"]["f1"] - sae_vals["stats"]["acts"]["f1"]
+    # sns.heatmap(f1_diff, cmap="RdBu_r", norm=norm, xticklabels=list(frequent_deps.keys()), yticklabels=np.arange(sae_vals["start_layer"], sae_vals["start_layer"] + sae_vals["n_layers"]))
+    # plt.title(f"{sae_name} SAE F1 score difference class $-$ acts (naive 0 threshold)")
+    # plt.show()
+
+
+# %%
+
+with open(os.path.expanduser("~/.config/keys.save")) as f:
+    # formatted as "OPENAI_API_KEY=...", but with multiple KEYS in the file
+    api_keys = {k: v for k, v in (line.replace('"', '').split("=") for line in f.read().strip().split("\n") if not line.startswith("#"))}
+
+# select only those latents where both precision and recall are > some threshold
+# precision_threshold = 0.4
+# recall_threshold = 0.4
+# f1_threshold = 0.2
+
+for sae_name, sae_vals in sae_comp.items():
+
+    # sae_vals["thresh_df"] = sae_vals["act_results"][np.logical_and(sae_vals["act_results"]["precision"] > precision_threshold, sae_vals["act_results"]["recall"] > recall_threshold)]
+
+    # print(sae_vals["thresh_df"].groupby("dependency").size())
+
+    # sae_vals["thresh_df"] = sae_vals["act_results"][sae_vals["act_results"]["f1"] > f1_threshold]
+    # print(sae_vals["thresh_df"].groupby("dependency").size())
+
+    idxmax = sae_vals["stats"]["acts"]["f1"]["max"].groupby("dependency")["f1"].idxmax()
+    max_df = sae_vals["stats"]["acts"]["f1"]["max"].loc[idxmax]
+
+    # max_df = max_df[max_df["f1"] > f1_threshold].reset_index(drop=True)
+    print(max_df)
+
+    # ulayers = np.unique(max_df["layer"])
+
+    # for layer in ulayers:
+    #     print(layer)
+
+    #     # look up the autointerp label for this layer
+    #     with open(f"data/neuronpedia/layer_{layer}.json", "r") as f:
+    #         neuronpedia_labels = json.load(f)
+
+    #     selected_saes = [("gemma-scope-2b-pt-res-canonical", f"layer_{layer}/width_16k/canonical")]
+    #     torch.set_grad_enabled(False)
+
+    #     cfg = AutoInterpEvalConfig(model_name="gemma-2-2b", device=device_sae, n_latents=None, override_latents=list(max_df[max_df["layer"] == layer]["latent"]), llm_dtype="bfloat16", llm_batch_size=32)
+    #     save_logs_path = os.path.join('data', 'logs', f"logs_layer_{layer}.txt")
+    #     output_path = os.path.join('data', 'sae_bench')
+    #     os.makedirs(os.path.dirname(save_logs_path), exist_ok=True)
+    #     os.makedirs(output_path, exist_ok=True)
+    #     results = run_eval(
+    #         cfg, selected_saes, str(device_sae), api_keys["OPENAI_API_KEY"], output_path=output_path,save_logs_path=save_logs_path
+    #     )
+
+
+    #     for row in max_df[max_df["layer"] == layer].itertuples():
+    #         print(row.dependency, row.layer, row.latent)
+
+    #         # display_dashboard(
+    #         #     sae_release="gemma-scope-2b-pt-res-canonical",
+    #         #     sae_id=f"layer_{row.layer}/width_16k/canonical",
+    #         #     latent_idx=row.latent,
+    #         #     width=800,
+    #         #     height=600
+    #         # )
+
+    #         neuronpedia_explanation = [x['explanation'] for x in neuronpedia_labels if int(x['index']) == row.latent]
+    #         print(neuronpedia_explanation)
+    #     break
+
 
 # %%
 # Compute z-scores and p-values for this layer
@@ -434,24 +608,6 @@ for which_W in ["enc", "dec"]:
         ax.set_title(title)
         plt.show()
 
-
-# %%
-# Compare F1 scores for linear probes vs. SAEs
-
-with open(f"data/evals/eval_{train_toks}_results_layers_{min(probes.keys())}-{max(probes.keys())}_ndeps_{len(frequent_deps)}.pkl", "rb") as f:
-    results = pickle.load(f)
-probe_f1_matrix = np.array([list(results[layer]["per_class_f1"].values()) for layer in results.keys() if isinstance(layer, int)])
-
-cmap = plt.cm.RdBu_r
-norm = plt.Normalize(vmin=-1, vmax=1)
-
-for sae_name, sae_vals in sae_comp.items():
-    # print(sae_name)
-    # print(sae_vals["f1_matrix"])
-    f1_diff = probe_f1_matrix[sae_vals["start_layer"]:] - sae_vals["stats"]["f1"]
-    sns.heatmap(f1_diff, cmap="RdBu_r", norm=norm, xticklabels=list(frequent_deps.keys()), yticklabels=np.arange(sae_vals["start_layer"], sae_vals["start_layer"] + sae_vals["n_layers"]))
-    plt.title(f"Linear Probe $-$ {sae_name} SAE F1 score difference")
-    plt.show()
 
 # %%
 # Plot dashboards for each of the top latents

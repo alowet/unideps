@@ -76,48 +76,6 @@ def get_significance_stars(pvalue, cramer_v=None):
         return "*"
 
 
-def plot_stars(g, subset, xvar, yvar):
-    """Plot significance stars and effect sizes on the graph."""
-    # Add significance stars
-    for ax in g.axes.flat:
-        if not ax.get_title():  # Skip empty subplots
-            continue
-
-        layer_str, rel_str = ax.get_title().split(" | ")
-        relation = rel_str.split(" = ")[1]
-        layer = int(layer_str.split(" = ")[1])
-
-        # Get data for this subplot
-        subplot_data = subset[
-            (subset["relation"] == relation) &
-            (subset["layer"] == layer)
-        ]
-
-        # Add significance stars and effect sizes at appropriate positions
-        for _, row in subplot_data.iterrows():
-            stars = get_significance_stars(row["pvalue"], row["cramer_v"])
-            if stars:
-                x = row[xvar]
-                y = row[yvar]
-
-                # Add stars
-                ax.text(x, y, stars,
-                       ha='center', va='bottom',
-                       color='black' if stars != "°" else 'gray')
-
-                # Optionally add effect size for large effects
-                if row["cramer_v"] > 0.3:  # Medium or large effect
-                    effect_size_text = f"V={row['cramer_v']:.2f}"
-                    ax.text(x, y, effect_size_text,
-                           ha='left', va='bottom',
-                           fontsize='x-small',
-                           color='darkgray')
-
-    for axvar, scale in [(xvar, plt.xscale), (yvar, plt.yscale)]:
-        if 'frac' in axvar:
-            scale("log")
-
-
 def interpret_effect_size(cramer_v):
     """Interpret Cramer's V effect size."""
     if cramer_v < 0.05:

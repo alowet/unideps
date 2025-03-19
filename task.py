@@ -109,16 +109,18 @@ class DependencyTask:
                         if head_num != 0:
                             head_pos = sentence.ids.index(head_num)
                             rel_idx = dep_table[rel]
+                            head_idxs[tail_pos, rel_idx] = head_pos
                             # Only include dependency if tail comes after head
                             if head_pos < tail_pos:
                                 relations[tail_pos, rel_idx] = 1
-                                head_idxs[tail_pos, rel_idx] = head_pos
                             else:
                                 relations[tail_pos, rel_idx] = torch.nan
 
                     else:
                         print(f"Relation {rel} not found in dependency table")
 
+        # print("relations", torch.logical_or(relations.isnan(), relations == 1).sum())
+        # print("head_idxs", (head_idxs != -1).sum())
         return relations, head_idxs
 
     @staticmethod

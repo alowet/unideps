@@ -22,6 +22,7 @@ from tqdm import tqdm
 
 sys.path.append("../matryoshka_sae")
 from sae import GlobalBatchTopKMatryoshkaSAE
+from sklearn.metrics import roc_auc_score
 from utils import load_sae_from_wandb
 
 
@@ -101,6 +102,7 @@ def evaluate_latent_predictions(
                     "FP": 0,
                     "FN": 0,
                     "support": 0,
+                    "auroc": [],
                     "rank": i_latent
                 }
 
@@ -146,6 +148,7 @@ def evaluate_latent_predictions(
                     for layer_i, latent_i in top_latents[dep_type]:
                         if layer_i == layer:  # Only process latents for current layer
                             stats = stats_by_dep[dep_type][(layer_i, latent_i)]
+                            stats["auroc"].append(roc_auc_score(dep_mask, latent_acts[:, latent_i]))
 
                             # Get predictions for this latent
                             pred_mask = latent_acts[:, latent_i] > threshold
@@ -179,6 +182,7 @@ def evaluate_latent_predictions(
                     'precision': precision,
                     'recall': recall,
                     'f1': f1,
+                    'auroc': np.mean(stats["auroc"]),
                     'support': stats["support"],
                     'true_positives': tp,
                     'false_positives': fp,
@@ -189,56 +193,105 @@ def evaluate_latent_predictions(
 
 def plot_precision_recall(
     results_df: pd.DataFrame,
-    top_latents: Dict[str, List[Tuple[int, int]]],
+    # top_latents: Dict[str, List[Tuple[int, int]]],
     save_path: Optional[str] = None
 ):
     """Plot precision/recall results.
 
     Args:
         results_df: DataFrame with precision/recall metrics
-        top_latents: Dictionary mapping dependency types to list of (layer, latent) tuples
+        # top_latents: Dictionary mapping dependency types to list of (layer, latent) tuples
         save_path: Optional path to save plot
     """
-    fig, axs = plt.subplots(2, 2, figsize=(15, 12))
+
 
     plot_df = results_df[results_df["support"] > 0]
     plot_df["id"] = plot_df['dependency'].astype(str) + '_' + plot_df['layer'].astype(str) + '_' + plot_df['latent'].astype(str)
 
-    top_latents_ids = ['_'.join([dep_type, str(layer), str(latent)]) for dep_type, latents in top_latents.items() for layer, latent in latents]
-    top_df = plot_df[np.logical_and(plot_df["setname"] == "test", plot_df["id"].isin(top_latents_ids))]
+    # plot_df["thresh"] = np.logical_and(plot_df["precision"] > 0.4, plot_df["recall"] > 0.4)
+    # thresh_df = pd.concat([plot_df[plot_df["thresh"]], plot_df[~plot_df["thresh"]].sample(plot_df["thresh"].sum())])
+    # ax = sns.scatterplot(
+    #     data=plot_df[plot_df["thresh"]],
+    #     x='recall',
+    #     y='precision',
+    #     size='support',
+    #     hue='dependency',
+    # )
+    # sns.move_legend(ax, "upper left", bbox_to_anchor=(1, 1), ncol=5)
+    # sns.scatterplot(
+    #     data=plot_df[~plot_df["thresh"]].sample(plot_df["thresh"].sum() * 100),
+    #     x='recall',
+    #     y='precision',
+    #     size='support',
+    #     color=[.3, .3, .3],
+    #     alpha=0.1
+    # )
+
+    # plt.hlines(0.4, 0, 1, color='black', linestyle='--')
+    # plt.vlines(0.4, 0, 1, color='black', linestyle='--')
+    # plt.savefig(save_path.replace("evaluation", "precision_recall"), bbox_inches='tight', dpi=300)
+    # plt.show()
+
+
+    fig, axs = plt.subplots(2, 2, figsize=(15, 12))
+
+    # top_latents_ids = ['_'.join([dep_type, str(layer), str(latent)]) for dep_type, latents in top_latents.items() for layer, latent in latents]
+    # top_df = plot_df[np.logical_and(plot_df["setname"] == "test", plot_df["id"].isin(top_latents_ids))]
 
     # Precision/Recall scatter plot
-    sns.scatterplot(
-        data=top_df,
-        x='recall',
-        y='precision',
-        size='support',
-        hue='layer',
-        ax=axs[0, 0]
-    )
-    axs[0, 0].set_title('Precision vs Recall by Dependency Type')
+    # sns.scatterplot(
+    #     data=top_df,
+    #     x='recall',
+    #     y='precision',
+    #     size='support',
+    #     hue='layer',
+    #     ax=axs[0, 0],
+    #     legend=False
+    # )
+    # axs[0, 0].set_title('Precision vs Recall by Dependency Type')
 
     # F1 score bar plot
     train_df = plot_df[plot_df["setname"] == "train"]
     test_df = plot_df[plot_df["setname"] == "test"]
 
+    top_n = 100
+    top_n_train_df = train_df.groupby('dependency', observed=True).apply(lambda x: x.sort_values('f1', ascending=False).head(top_n)).reset_index(drop=True)
+    top_n_test_df = test_df[test_df["id"].isin(top_n_train_df["id"])].reset_index(drop=True)
+    idx_max_train = train_df.groupby(['dependency', 'layer'], observed=True)["f1"].idxmax()
+    max_test_df = test_df[test_df["id"].isin(train_df.loc[idx_max_train, "id"])].reset_index(drop=True)
+
+    # top_n_test_df["setname"] = top_n_test_df["setname"].astype(str)
+    # top_n_test_df["dependency"] = top_n_test_df["dependency"].astype(str)
+
+    sns.scatterplot(
+        data=top_n_test_df,
+        x='recall',
+        y='precision',
+        size='support',
+        hue='dependency',
+        ax=axs[0, 0]
+    )
+    axs[0, 0].set_title(f'Precision vs Recall for top {top_n} latents for each dependency type')
+    axs[0, 0].set_xlim(-0.05, 1.05)
+    axs[0, 0].set_ylim(-0.05, 1.05)
+    sns.move_legend(axs[0, 0], "upper left", bbox_to_anchor=(-0.1, -0.1), ncol=5)
+
     # Create the heatmap
-    stats = {}
+    stats = {"top_n_test": top_n_test_df,
+             "max_test": max_test_df}
     for stat, ax in zip(['f1', 'precision', 'recall'], axs.flat[1:]):
         # First, find the indices of the rows with max F1 for each dependency and layer in the training set
         # We use idxmax() to get the index of the maximum value
-        idx_max_train = train_df.groupby(['dependency', 'layer'], observed=True)[stat].idxmax()
+        # idx_max_train = train_df.groupby(['dependency', 'layer'], observed=True)[stat].idxmax()
 
-        # Then use these indices to get the corresponding rows, which will include all columns
-        max_train_rows = train_df.loc[idx_max_train]
+        # # Then use these indices to get the corresponding rows, which will include all columns
+        # max_train_rows = train_df.loc[idx_max_train]
 
-        # Now we can get the IDs of these maximum F1 latents
-        # max_train_ids = max_train_rows['id'].values
 
-        # Filter test data to only include these IDs
-        max_test_stat = test_df[test_df["id"].isin(max_train_rows['id'])].groupby(['dependency', 'layer'], observed=True)[stat].max().reset_index()
+        # # Filter test data to only include these IDs
+        # max_test_stat = test_df[test_df["id"].isin(max_train_rows['id'])].reset_index(drop=True)
 
-        stat_matrix = max_test_stat.pivot(index='layer', columns='dependency', values=stat)
+        stat_matrix = max_test_df.pivot(index='layer', columns='dependency', values=stat)
 
         sns.heatmap(
             data=stat_matrix,
@@ -246,12 +299,14 @@ def plot_precision_recall(
             vmin=0,
             vmax=1,
             ax=ax,
-            yticklabels=np.arange(25, 25 - stat_matrix.shape[0], -1)[::-1]
+            yticklabels=np.arange(stat_matrix.shape[0])
         )
-        ax.set_title(f'{stat.capitalize()} Score for Max Latent')
+        ax.set_title(f'{stat.capitalize()} Score for Max F1 Latent')
         ax.set_ylabel('Layer')
         ax.set_xlabel('Dependency')
+
         stats[stat] = stat_matrix
+        # stats[stat]["max"] = max_test_stat
 
     plt.tight_layout()
     if save_path:
@@ -266,12 +321,12 @@ def main(
     test_loader: DataLoader,
     similarities: np.ndarray,
     frequent_deps: List[str],
-    n_top: int = 2,
     which_sae: str = "gemma_scope",
     device: Optional[torch.device] = None,
     model_name: str = "trail_tail_min_20",
     start_layer: int = 4,
-    stop_layer: int = 9
+    stop_layer: int = 9,
+    return_class: bool = False
 ):
     """Main function to evaluate top latents.
 
@@ -281,7 +336,6 @@ def main(
         test_loader: DataLoader for test set
         similarities: Similarities array [n_layers, n_deps, d_sae]
         frequent_deps: List of dependency types to evaluate
-        n_top: Number of top latents to use per dependency
         which_sae: Which SAE to use
         device: Device to run evaluation on
         model_name: Name of the model
@@ -292,10 +346,10 @@ def main(
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Get top latents for each dependency type
-    top_latents = get_top_latents_per_dep(similarities, frequent_deps, n_top)
+    # top_latents = get_top_latents_per_dep(similarities, frequent_deps, n_top)
 
     # Evaluate on test set
-    class_results, act_results = evaluate_all_latents(
+    [act_results] = evaluate_all_latents(
             ud_model=ud_model,
             train_loader=train_loader,
             test_loader=test_loader,
@@ -303,22 +357,25 @@ def main(
             which_sae=which_sae,
             device=device,
             start_layer=start_layer,
-            stop_layer=stop_layer
+            stop_layer=stop_layer,
+            return_class=return_class
         )
 
     # save the results
-    fpath = f"data/sae/{which_sae}/class_results_{model_name}.parquet"
+    fpath = f"data/sae/{which_sae}/acts_results_{model_name}.parquet"
     os.makedirs(os.path.dirname(fpath), exist_ok=True)
-    class_results.to_parquet(fpath)
-    act_results.to_parquet(fpath.replace("class", "acts"))
+    act_results.to_parquet(fpath)
+    # class_results.to_parquet(fpath.replace("acts", "class"))
 
     stats = {}
-    for results_df, which_class in zip([class_results, act_results], ["class", "acts"]):
-        stats[which_class] = plot_precision_recall(results_df, top_latents=top_latents, save_path=f"figures/sae/{which_sae}/top_{n_top}_{which_class}_evaluation_{model_name}.png")
+    # for results_df, which_class in zip([class_results, act_results], ["class", "acts"]):
+    for results_df, which_class in zip([act_results], ["acts"]):
+        stats[which_class] = plot_precision_recall(results_df, # top_latents=top_latents,
+                                                   save_path=f"figures/sae/{which_sae}/{which_class}_evaluation_{model_name}.png")
     with open(f"data/sae/{which_sae}/stats_{model_name}.pkl", "wb") as f:
         pickle.dump(stats, f)
 
-    return class_results, act_results, stats
+    return act_results, stats
 
 
 def evaluate_all_latents(
@@ -326,14 +383,15 @@ def evaluate_all_latents(
     train_loader: DataLoader,
     test_loader: DataLoader,
     frequent_deps: List[str],
-    which_sae: str,
+    which_sae: str | None,
     device: torch.device,
     start_layer: int = 4,
     stop_layer: int = 9,
     learning_rate: float = 1e-2,
     num_epochs: int = 10,
-    batch_size: int = 1024
-) -> pd.DataFrame:
+    batch_size: int = 1024,
+    return_class: bool = False
+) -> List[pd.DataFrame]:
     """Evaluate precision/recall of ALL latents using parallel probe training.
 
     Args:
@@ -348,9 +406,10 @@ def evaluate_all_latents(
         learning_rate: Learning rate for probe training
         num_epochs: Number of epochs for probe training
         batch_size: Batch size for probe training
+        return_class: Whether to return class results
     """
 
-    columns = ['setname', 'dependency', 'layer', 'latent', 'precision', 'recall', 'f1', 'support', 'true_positives', 'false_positives', 'false_negatives']
+    columns = ['setname', 'dependency', 'layer', 'latent', 'precision', 'recall', 'f1', 'auroc', 'support', 'true_positives', 'false_positives', 'false_negatives']
     # class_results = pd.DataFrame(columns=columns)
     # act_results = pd.DataFrame(columns=columns)
     class_list = []
@@ -428,15 +487,20 @@ def evaluate_all_latents(
             sae_id = f"layer_{layer}/width_{width}k/canonical"
             sae = SAE.from_pretrained(sae_release, sae_id, device=str(device))[0]
         elif which_sae == "matryoshka":
-            sae_id = f"gemma-2-2b_blocks.{layer + 1}.hook_resid_pre_36864_global-matryoshka-topk_32_0.0003_122069"
+            sae_id = f"gemma-2-2b_blocks.{layer + 1}.hook_resid_pre_36864_global-matryoshka-topk_32_0.0003_122069" if layer + 1 < stop_layer else f"gemma-2-2b_blocks.{layer}.hook_resid_post_36864_global-matryoshka-topk_32_0.0003_122069"
             sae, cfg = load_sae_from_wandb(f"{entity}/{project}/{sae_id}:latest", GlobalBatchTopKMatryoshkaSAE)
 
         d_sae = sae.W_enc.shape[1]  # Get number of latents
 
         # Initialize parallel probes for each dependency type
-        probes = {dep_type: ParallelProbe(d_sae).to(device) for dep_type in frequent_deps}
-        optimizers = {dep_type: torch.optim.Adam(probes[dep_type].parameters(), lr=learning_rate) for dep_type in frequent_deps}
+        parallel_probes = {dep_type: ParallelProbe(d_sae).to(device) for dep_type in frequent_deps}
+        optimizers = {dep_type: torch.optim.Adam(parallel_probes[dep_type].parameters(), lr=learning_rate) for dep_type in frequent_deps}
 
+        if not return_class:
+            num_epochs = 1
+            which_class_names = ["acts"]
+        else:
+            which_class_names = ["acts", "class"]
 
         for setname, loader, n_epochs in [("train", train_loader, num_epochs), ("test", test_loader, 1)]:
 
@@ -447,9 +511,11 @@ def evaluate_all_latents(
                         "TP": np.zeros(d_sae, dtype=np.int16),
                         "FP": np.zeros(d_sae, dtype=np.int16),
                         "FN": np.zeros(d_sae, dtype=np.int16),
-                        "total": 0
+                        "total": 0,
+                        # "auroc": np.zeros(d_sae, dtype=np.float32)
+                        "auroc": 0
                     } for dep_type in frequent_deps
-                } for which_class_name in ["class", "acts"]
+                } for which_class_name in which_class_names
             }
 
             # Process each epoch
@@ -480,12 +546,13 @@ def evaluate_all_latents(
                             if train_labels.sum() == 0:
                                 continue  # Skip this batch if no positive examples
 
-                            probes[dep_type].train()
-                            optimizers[dep_type].zero_grad()
-                            loss = probes[dep_type].compute_loss(latent_acts[~tail_before_head[:, dep_idx]], train_labels)
-                            loss.backward()
-                            optimizers[dep_type].step()
-                            total_losses[dep_type] += loss.item()
+                            if return_class:
+                                parallel_probes[dep_type].train()
+                                optimizers[dep_type].zero_grad()
+                                loss = parallel_probes[dep_type].compute_loss(latent_acts[~tail_before_head[:, dep_idx]], train_labels)
+                                loss.backward()
+                                optimizers[dep_type].step()
+                                total_losses[dep_type] += loss.item()
 
 
                         if epoch == n_epochs - 1:
@@ -493,10 +560,11 @@ def evaluate_all_latents(
                             # Get ground truth for this dependency
                             dep_mask = relations[:, dep_idx][~tail_before_head[:, dep_idx]].bool()  # [n_tokens], excl. nan
 
-                            batch_class = probes[dep_type](latent_acts[~tail_before_head[:, dep_idx]]) > 0.5  # [n_tokens, d_sae]
-                            batch_acts = latent_acts[~tail_before_head[:, dep_idx]] > 0  # [n_tokens, d_sae], excl. nan
+                            batch_class = parallel_probes[dep_type](latent_acts[~tail_before_head[:, dep_idx]]) > 0.5  # [n_tokens, d_sae]
+                            batch_acts = latent_acts[~tail_before_head[:, dep_idx]]  # [n_tokens, d_sae], excl. nan
+                            batch_thresh = batch_acts > 0  # [n_tokens, d_sae]
 
-                            for which_class, which_class_name in [(batch_class, "class"), (batch_acts, "acts")]:
+                            for which_class, which_class_name in zip([batch_thresh, batch_class], which_class_names):
                                 # Compute TP, FP, FN for each latent in the batch
                                 # For each latent, we have a binary prediction for each token
                                 tp = torch.nansum(which_class & dep_mask.unsqueeze(1), dim=0).cpu().numpy()
@@ -509,13 +577,16 @@ def evaluate_all_latents(
                                 dep_counters[which_class_name][dep_type]["FN"] += fn
                                 dep_counters[which_class_name][dep_type]["total"] += dep_mask.sum().item()
 
-            if dep_counters["class"]["ccomp"]["total"] == 0:
+                            # batch_acts = batch_acts.cpu().numpy()
+                            # dep_counters["acts"][dep_type]["auroc"] += np.array([roc_auc_score(dep_mask.cpu().numpy(), batch_acts[:, i_latent]) for i_latent in range(d_sae)])
+
+            if dep_counters["acts"]["ccomp"]["total"] == 0:
                 raise Exception(f"No ccomp dependencies found for layer {layer}")
 
-            if setname == "train":
+            if setname == "train" and return_class:
                 print(total_losses)
 
-            for which_class_name, results_list in zip(dep_counters.keys(), [class_list, act_list]):
+            for which_class_name, results_list in zip(which_class_names, [act_list, class_list]):
                 layer_results = pd.DataFrame(columns=columns)
                 for dep_type, counters in dep_counters[which_class_name].items():
                     tp = counters["TP"]
@@ -531,7 +602,7 @@ def evaluate_all_latents(
                                 where=(precision + recall) > 0)
 
                     # Add to results
-                    tmp = pd.DataFrame(data=dict(zip(columns, [repeat(setname, d_sae), repeat(dep_type, d_sae), repeat(np.int8(layer), d_sae), np.arange(d_sae, dtype=np.int16), precision, recall, f1, repeat(total, d_sae), tp, fp, fn])))
+                    tmp = pd.DataFrame(data=dict(zip(columns, [repeat(setname, d_sae), repeat(dep_type, d_sae), repeat(np.int8(layer), d_sae), np.arange(d_sae, dtype=np.int16), precision, recall, f1, repeat(0, d_sae), repeat(total, d_sae), tp, fp, fn])))
                     if layer_results.empty:
                         layer_results = tmp
                     else:
@@ -546,18 +617,18 @@ def evaluate_all_latents(
         print(len(class_list), len(act_list))
 
         # Cleanup
-        del sae, probes, optimizers, train_labels, dep_counters
+        del sae, parallel_probes, optimizers, train_labels, dep_counters
         gc.collect()
         torch.cuda.empty_cache()
 
-    class_results = pd.concat(class_list, axis=0, ignore_index=True)
     act_results = pd.concat(act_list, axis=0, ignore_index=True)
+    df_list = [act_results]
+    if return_class:
+        class_results = pd.concat(class_list, axis=0, ignore_index=True)
+        df_list.append(class_results)
 
-    for df in [class_results, act_results]:
+    for df, which_class_name in zip(df_list, which_class_names):
         df["setname"] = df["setname"].astype("category")
         df["dependency"] = df["dependency"].astype("category")
 
-    print(class_results.dtypes)
-    print(act_results.dtypes)
-
-    return class_results, act_results
+    return df_list  # [act_results] or [act_results, class_results]
