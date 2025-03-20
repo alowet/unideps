@@ -53,6 +53,7 @@ from evaluate_top_latents import (
     evaluate_latent_predictions,
     get_top_latents_per_dep,
     plot_precision_recall,
+    main as evaluate_top_latents_main
 )
 from evaluate_top_latents import main as evaluate_top_latents_main
 from sae import BatchTopKSAE, GlobalBatchTopKMatryoshkaSAE
@@ -113,11 +114,11 @@ dev_loader = DataLoader(
 
 # %%
 
-probe_type = "multiclass"  # "multiclass" or "binary"
-max_layer = 26  # have only trained binary probes up to this layer for now
+probe_type = "multiclass"
+max_layer = 26
 
 
-train_toks = "concat"
+train_toks = "tail"
 min_occurrences = 20
 deps = DependencyTask.dependency_table()
 dep_counts = DependencyTask.count_dependencies(train_data)
@@ -179,11 +180,11 @@ else:
         del probe
         empty_cache()
 
-        # comment the next line out if you want to overwrite existing probes
-        # if not os.path.exists(model_path):
-        with open(model_path, "wb") as f:
-            print(f"Saving probes to {model_path}")
-            pickle.dump(probes, f)
+    # comment the next line out if you want to overwrite existing probes
+    # if not os.path.exists(model_path):
+    with open(model_path, "wb") as f:
+        print(f"Saving probes to {model_path}")
+        pickle.dump(probes, f)
 
 
 # %%
@@ -363,16 +364,6 @@ for sae_name, sae_width in [("gemma_scope", 16), ("matryoshka", 16)]:
 
 # %%
 # Compute precision, recall and F1 scores for each latent and plot for top latents
-import evaluate_top_latents
-
-importlib.reload(evaluate_top_latents)
-from evaluate_top_latents import (
-    get_top_latents_per_dep,
-    evaluate_latent_predictions,
-    plot_precision_recall,
-    evaluate_all_latents,
-    main as evaluate_top_latents_main
-)
 
 which_class_names = ["acts"]
 return_class = False
@@ -394,7 +385,6 @@ for sae_name, sae_vals in sae_comp.items():
         #     pickle.dump(stats, f)
 
     else:
-    # if True:
         acts_results, stats = evaluate_top_latents_main(
             ud_model=ud_model,
             train_loader=train_loader,
@@ -464,7 +454,7 @@ plt.savefig(f"figures/sae/f1_diff_matryoshka_gemma_scope_{model_name}.png", bbox
 plt.show()
 
 # %%
-# plot as a bar chart layer 12
+# plot F1 for linear, GemmaScope, and Matryoshka as a bar chart layer 12
 plot_layer = 12
 
 eval_df = pd.DataFrame({k: v for k, v in probe_results[plot_layer].items() if k not in ["probs", "accuracy"]})
@@ -492,8 +482,7 @@ plt.show()
 
 # %%
 # Compare F1 scores for linear probes vs. SAEs
-# with open(f"data/evals/{probe_type}_eval_{train_toks}_results_layers_{min(probes.keys())}-{max(probes.keys())}_ndeps_{len(frequent_deps)}.pkl", "rb") as f:
-#     eval_results = pickle.load(f)
+
 mats, tail_results, concat_results, diff_results = {}, {}, {}, {}
 
 for d, name in zip([tail_results, concat_results], ["tail", "concat"]):
@@ -526,74 +515,75 @@ for which_class_name in ["acts"]:  # "class",
     # plt.show()
 
 # %%
+# plot the difference in F1 between concat and tail probes
 sns.heatmap(mats["concat"] - mats["tail"], cmap="RdBu_r", norm=norm, xticklabels=list(frequent_deps.keys()), yticklabels=np.arange(max_layer))
 plt.title(f"Linear Probes: Concat F1 $-$ Tail F1")
 plt.savefig(f"figures/sae/f1_diff_concat_probe.png", bbox_inches="tight")
 plt.show()
 
 
-# %%
+# # %%
 
-with open(os.path.expanduser("~/.config/keys.save")) as f:
-    # formatted as "OPENAI_API_KEY=...", but with multiple KEYS in the file
-    api_keys = {k: v for k, v in (line.replace('"', '').split("=") for line in f.read().strip().split("\n") if not line.startswith("#"))}
+# with open(os.path.expanduser("~/.config/keys.save")) as f:
+#     # formatted as "OPENAI_API_KEY=...", but with multiple KEYS in the file
+#     api_keys = {k: v for k, v in (line.replace('"', '').split("=") for line in f.read().strip().split("\n") if not line.startswith("#"))}
 
-# select only those latents where both precision and recall are > some threshold
-# precision_threshold = 0.4
-# recall_threshold = 0.4
-# f1_threshold = 0.2
+# # select only those latents where both precision and recall are > some threshold
+# # precision_threshold = 0.4
+# # recall_threshold = 0.4
+# # f1_threshold = 0.2
 
-for sae_name, sae_vals in sae_comp.items():
+# for sae_name, sae_vals in sae_comp.items():
 
-    # sae_vals["thresh_df"] = sae_vals["act_results"][np.logical_and(sae_vals["act_results"]["precision"] > precision_threshold, sae_vals["act_results"]["recall"] > recall_threshold)]
+#     # sae_vals["thresh_df"] = sae_vals["act_results"][np.logical_and(sae_vals["act_results"]["precision"] > precision_threshold, sae_vals["act_results"]["recall"] > recall_threshold)]
 
-    # print(sae_vals["thresh_df"].groupby("dependency").size())
+#     # print(sae_vals["thresh_df"].groupby("dependency").size())
 
-    # sae_vals["thresh_df"] = sae_vals["act_results"][sae_vals["act_results"]["f1"] > f1_threshold]
-    # print(sae_vals["thresh_df"].groupby("dependency").size())
+#     # sae_vals["thresh_df"] = sae_vals["act_results"][sae_vals["act_results"]["f1"] > f1_threshold]
+#     # print(sae_vals["thresh_df"].groupby("dependency").size())
 
-    idxmax = sae_vals["stats"]["acts"]["f1"]["max"].groupby("dependency")["f1"].idxmax()
-    max_df = sae_vals["stats"]["acts"]["f1"]["max"].loc[idxmax]
+#     idxmax = sae_vals["stats"]["acts"]["f1"]["max"].groupby("dependency")["f1"].idxmax()
+#     max_df = sae_vals["stats"]["acts"]["f1"]["max"].loc[idxmax]
 
-    # max_df = max_df[max_df["f1"] > f1_threshold].reset_index(drop=True)
-    print(max_df)
+#     # max_df = max_df[max_df["f1"] > f1_threshold].reset_index(drop=True)
+#     print(max_df)
 
-    # ulayers = np.unique(max_df["layer"])
+#     # ulayers = np.unique(max_df["layer"])
 
-    # for layer in ulayers:
-    #     print(layer)
+#     # for layer in ulayers:
+#     #     print(layer)
 
-    #     # look up the autointerp label for this layer
-    #     with open(f"data/neuronpedia/layer_{layer}.json", "r") as f:
-    #         neuronpedia_labels = json.load(f)
+#     #     # look up the autointerp label for this layer
+#     #     with open(f"data/neuronpedia/layer_{layer}.json", "r") as f:
+#     #         neuronpedia_labels = json.load(f)
 
-    #     selected_saes = [("gemma-scope-2b-pt-res-canonical", f"layer_{layer}/width_16k/canonical")]
-    #     torch.set_grad_enabled(False)
+#     #     selected_saes = [("gemma-scope-2b-pt-res-canonical", f"layer_{layer}/width_16k/canonical")]
+#     #     torch.set_grad_enabled(False)
 
-    #     cfg = AutoInterpEvalConfig(model_name="gemma-2-2b", device=device_sae, n_latents=None, override_latents=list(max_df[max_df["layer"] == layer]["latent"]), llm_dtype="bfloat16", llm_batch_size=32)
-    #     save_logs_path = os.path.join('data', 'logs', f"logs_layer_{layer}.txt")
-    #     output_path = os.path.join('data', 'sae_bench')
-    #     os.makedirs(os.path.dirname(save_logs_path), exist_ok=True)
-    #     os.makedirs(output_path, exist_ok=True)
-    #     results = run_eval(
-    #         cfg, selected_saes, str(device_sae), api_keys["OPENAI_API_KEY"], output_path=output_path,save_logs_path=save_logs_path
-    #     )
+#     #     cfg = AutoInterpEvalConfig(model_name="gemma-2-2b", device=device_sae, n_latents=None, override_latents=list(max_df[max_df["layer"] == layer]["latent"]), llm_dtype="bfloat16", llm_batch_size=32)
+#     #     save_logs_path = os.path.join('data', 'logs', f"logs_layer_{layer}.txt")
+#     #     output_path = os.path.join('data', 'sae_bench')
+#     #     os.makedirs(os.path.dirname(save_logs_path), exist_ok=True)
+#     #     os.makedirs(output_path, exist_ok=True)
+#     #     results = run_eval(
+#     #         cfg, selected_saes, str(device_sae), api_keys["OPENAI_API_KEY"], output_path=output_path,save_logs_path=save_logs_path
+#     #     )
 
 
-    #     for row in max_df[max_df["layer"] == layer].itertuples():
-    #         print(row.dependency, row.layer, row.latent)
+#     #     for row in max_df[max_df["layer"] == layer].itertuples():
+#     #         print(row.dependency, row.layer, row.latent)
 
-    #         # display_dashboard(
-    #         #     sae_release="gemma-scope-2b-pt-res-canonical",
-    #         #     sae_id=f"layer_{row.layer}/width_16k/canonical",
-    #         #     latent_idx=row.latent,
-    #         #     width=800,
-    #         #     height=600
-    #         # )
+#     #         # display_dashboard(
+#     #         #     sae_release="gemma-scope-2b-pt-res-canonical",
+#     #         #     sae_id=f"layer_{row.layer}/width_16k/canonical",
+#     #         #     latent_idx=row.latent,
+#     #         #     width=800,
+#     #         #     height=600
+#     #         # )
 
-    #         neuronpedia_explanation = [x['explanation'] for x in neuronpedia_labels if int(x['index']) == row.latent]
-    #         print(neuronpedia_explanation)
-    #     break
+#     #         neuronpedia_explanation = [x['explanation'] for x in neuronpedia_labels if int(x['index']) == row.latent]
+#     #         print(neuronpedia_explanation)
+#     #     break
 
 
 # %%
