@@ -43,9 +43,21 @@ class BinaryDependencyProbe(nn.Module):
         """Maps token embeddings to a single dependency relation logit."""
         return self.probe(embeddings)
 
+class AngularProbe(nn.Module):
+    """Angular probe for predicting dependency relations at each position."""
+
+    def __init__(self, input_dim: int, d_subspace: int = 128):
+        super().__init__()
+        self.probe = nn.Linear(input_dim, d_subspace)  # B matrix from Diego-Simon et al., 2024
+        self.d_subspace = d_subspace
+
+    def forward(self, embeddings: torch.Tensor) -> torch.Tensor:
+        """Maps token embeddings to low-dimensional subspace."""
+        return self.probe(embeddings)
+
 
 def compute_loss(
-    probe: Union[DependencyProbe, BinaryDependencyProbe],
+    probe: Union[DependencyProbe, BinaryDependencyProbe, AngularProbe],
     model: UDTransformer,
     batch: Dict,
     layer: int,
@@ -123,7 +135,7 @@ def compute_loss(
         scores_masked = scores[relation_mask][relations_notnan]  # [relation_mask.sum()]
         preds_masked = preds[relation_mask][relations_notnan]  # [relation_mask.sum()]
 
-    elif train_toks in ["head", "diff", "concat"]:
+    elif train_toks in ["head", "diff", "concat", "angular"]:
         # integer tensor, where each int is the index of the head token for the relation
         head_idxs = batch["head_idxs"].to(device)  # size [batch, max_tokens, num_relations]
         # print("head_idxs.shape", head_idxs.shape)
@@ -159,21 +171,38 @@ def compute_loss(
 
         notnull_relations = relations_tail_masked.any(dim=-1)
 
-        head_acts_masked = head_acts_masked[notnull_relations]
-        tail_acts_masked = tail_acts_masked[notnull_relations]
-        relations_masked = relations_tail_masked[notnull_relations].float()
+        head_acts_masked = head_acts_masked[notnull_relations]  # [relations.sum(), d_model]
+        tail_acts_masked = tail_acts_masked[notnull_relations]  # [relations.sum(), d_model]
+        relations_masked = relations_tail_masked[notnull_relations].float()  # [relations.sum(), num_relations]
 
-        if train_toks == "concat":
-            # concatenate head and tail activations
-            acts_masked = torch.cat([head_acts_masked, tail_acts_masked], dim=-1)
-        elif train_toks == "diff":
-            # difference between head and tail activations
-            acts_masked = head_acts_masked - tail_acts_masked
-        elif train_toks == "head":
-            acts_masked = head_acts_masked
+        if train_toks == "angular":
+            head_transformed = probe(head_acts_masked)  # [relations.sum(), d_subspace]
+            tail_transformed = probe(tail_acts_masked)  # [relations.sum(), d_subspace]
+            cos_sims = torch.nn.functional.cosine_similarity(head_transformed, tail_transformed, dim=-1)  # [relations.sum()]
+            scores_masked = cos_sims.unsqueeze(-1) - relations_masked  # [relations.sum(), num_relations]
+            loss = torch.mean(torch.pow(scores_masked, 2))
+            if return_type == "loss":
+                return loss, scores_masked
+            else:
+                V_c = torch.stack([torch.mean(probe(tail_acts_masked[relations_masked.bool()[:, i_dep]]), dim=0) for i_dep in range(len(frequent_deps))], dim=0)  # [num_relations, d_subspace]
+                argmaxes = torch.argmax(torch.abs(torch.nn.functional.cosine_similarity(tail_transformed.unsqueeze(1), V_c, dim=-1)), dim=-1)
+                preds_masked = torch.zeros_like(relations_masked)
+                preds_masked[torch.arange(len(argmaxes)), argmaxes] = 1
 
-        scores_masked = probe(acts_masked)
-        preds_masked = torch.sigmoid(scores_masked) > 0.5
+                return preds_masked, relations_masked, scores_masked
+
+        else:
+            if train_toks == "concat":
+                # concatenate head and tail activations
+                acts_masked = torch.cat([head_acts_masked, tail_acts_masked], dim=-1)
+            elif train_toks == "diff":
+                # difference between head and tail activations
+                acts_masked = head_acts_masked - tail_acts_masked
+            elif train_toks == "head":
+                acts_masked = head_acts_masked
+
+            scores_masked = probe(acts_masked)
+            preds_masked = torch.sigmoid(scores_masked) > 0.5
 
 
     elif train_toks == "last":
@@ -260,13 +289,13 @@ def train_probe(
 
     # Helper function for the training loop (common to both approaches)
     def train_single_probe(
-        probe: Union[DependencyProbe, BinaryDependencyProbe],
+        probe: Union[DependencyProbe, BinaryDependencyProbe, AngularProbe],
         optimizer: torch.optim.Optimizer,
         scheduler: torch.optim.lr_scheduler.ReduceLROnPlateau,
         is_binary: bool = False,
         dep_idx: Optional[int] = None,
         dep_name: Optional[str] = None
-    ) -> Union[DependencyProbe, BinaryDependencyProbe]:
+    ) -> Union[DependencyProbe, BinaryDependencyProbe, AngularProbe]:
         """Train a single probe (either multiclass or binary)."""
         # Track best model
         best_dev_loss = float('inf')
@@ -389,11 +418,14 @@ def train_probe(
             }
         )
 
-        probe = DependencyProbe(hidden_dim, num_relations, train_toks).to(device)
+        if train_toks == "angular":
+            probe = AngularProbe(hidden_dim, d_subspace=128).to(device)
+        else:
+            probe = DependencyProbe(hidden_dim, num_relations, train_toks).to(device)
         optimizer = torch.optim.Adam(probe.parameters(), lr=learning_rate)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=1)
 
-        print(f"\nTraining multiclass probe for layer {layer}")
+        print(f"\nTraining multiclass {train_toks} probe for layer {layer}")
         trained_probe = train_single_probe(probe, optimizer, scheduler, is_binary=False)
 
         wandb.finish()
@@ -405,7 +437,7 @@ def train_probe(
         probes: Dict[str, BinaryDependencyProbe] = {}
 
         for dep_idx, dep_name in enumerate(dep_list):
-            print(f"\nTraining binary probe for dependency: {dep_name} ({dep_idx+1}/{len(dep_list)})")
+            print(f"\nTraining binary probe {train_toks} for dependency: {dep_name} ({dep_idx+1}/{len(dep_list)})")
 
             # Don't initialize wandb for binary probes because they're just so many of them, I don't want the overhead
             # wandb.init(

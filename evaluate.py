@@ -1,7 +1,7 @@
 """Evaluation and visualization for dependency probes."""
 
 import pickle
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -9,7 +9,7 @@ import seaborn as sns
 import torch
 from model_utils import UDTransformer
 from probing import DependencyProbe, compute_loss
-from sklearn.metrics import balanced_accuracy_score, f1_score
+from sklearn.metrics import balanced_accuracy_score, f1_score, precision_recall_curve
 from task import DependencyTask
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -248,13 +248,85 @@ def compute_majority_baseline(test_loader: DataLoader, frequent_deps: Optional[l
     return baseline_metrics
 
 
+def plot_probe_pr_curves(
+    results: Dict[int, Dict],
+    frequent_deps: List[str],
+    save_path: Optional[str] = None
+):
+    """Plot precision-recall curves for probes.
+
+    Args:
+        results: Dictionary mapping layer indices to evaluation results
+        frequent_deps: List of dependency types to evaluate
+        save_path: Optional path to save plot
+    """
+    plt.style.use('seaborn-v0_8')
+    n_deps = len(frequent_deps)
+    n_cols = min(7, n_deps)
+    n_rows = (n_deps + n_cols - 1) // n_cols
+
+    fig, axs = plt.subplots(n_rows, n_cols, figsize=(n_cols*3, n_rows*3))
+    if n_rows == 1:
+        axs = axs.reshape(1, -1)
+
+    # Create color map for layers
+    n_layers = len(results)
+    colors = plt.cm.viridis(np.linspace(0, 1, n_layers))
+
+    for dep_idx, dep in enumerate(frequent_deps):
+        row = dep_idx // n_cols
+        col = dep_idx % n_cols
+        ax = axs[row, col]
+
+        max_f1 = 0
+        best_layer = None
+
+        for layer_idx, layer_results in results.items():
+            per_class = layer_results["per_class"][dep]
+            raw_preds = per_class["raw_preds"]
+            true_labels = per_class["true_labels"]
+
+            # Compute precision-recall curve
+            precision, recall, thresholds = precision_recall_curve(true_labels, raw_preds)
+            f1_scores = 2 * (precision * recall) / (precision + recall + 1e-10)
+            max_layer_f1 = np.max(f1_scores)
+
+            if max_layer_f1 > max_f1:
+                max_f1 = max_layer_f1
+                best_layer = layer_idx
+
+            ax.plot(recall, precision, color=colors[layer_idx], alpha=0.5,
+                   label=f'Layer {layer_idx}' if col == 0 else None)
+
+        ax.set_title(f'{dep}\nBest F1={max_f1:.3f} (L{best_layer})')
+        ax.set_xlabel('Recall' if row == n_rows-1 else '')
+        ax.set_ylabel('Precision' if col == 0 else '')
+        ax.grid(True, alpha=0.3)
+
+    # Remove empty subplots
+    for idx in range(dep_idx + 1, n_rows * n_cols):
+        row = idx // n_cols
+        col = idx % n_cols
+        fig.delaxes(axs[row, col])
+
+    # Add legend
+    handles, labels = axs[0, 0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc='center right', bbox_to_anchor=(0.98, 0.5))
+
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, bbox_inches='tight', dpi=300)
+    plt.show()
+
+
 def main(
     test_loader: DataLoader,
     probes: Dict[int, DependencyProbe],
     model: UDTransformer,
     train_toks: str = "tail",
     device: Optional[torch.device] = None,
-    frequent_deps: Optional[list] = None
+    frequent_deps: Optional[list] = None,
+    probe_type: str = "multiclass"
 ):
     """Main evaluation function."""
     if device is None:
@@ -288,9 +360,13 @@ def main(
         print(f"  Weighted F1: {metrics['weighted_f1'] - baseline['weighted_f1']:.3f}")
 
     # Plot results
-    plot_layer_results(results, baseline, frequent_deps, save_path=f"figures/evals/eval_{train_toks}_results_layers_{min(probes.keys())}-{max(probes.keys())}_ndeps_{len(frequent_deps)}.png")
+    plot_layer_results(results, baseline, frequent_deps, save_path=f"figures/evals/eval_{probe_type}_{train_toks}_results_layers_{min(probes.keys())}-{max(probes.keys())}_ndeps_{len(frequent_deps)}.png")
+
+    save_path = f"figures/evals/eval_{probe_type}_{train_toks}_pr_curves_layers_{min(probes.keys())}-{max(probes.keys())}_ndeps_{len(frequent_deps)}.png"
+    print(f"Saving PR curves to {save_path}")
+    plot_probe_pr_curves(results, frequent_deps, save_path=save_path)
 
     # Save results with baseline
     results["baseline"] = baseline
-    with open(f"data/evals/eval_{train_toks}_results_layers_{min(probes.keys())}-{max(probes.keys())}_ndeps_{len(frequent_deps)}.pkl", "wb") as f:
+    with open(f"data/evals/eval_{probe_type}_{train_toks}_results_layers_{min(probes.keys())}-{max(probes.keys())}_ndeps_{len(frequent_deps)}.pkl", "wb") as f:
         pickle.dump(results, f)

@@ -117,7 +117,7 @@ probe_type = "multiclass"  # "multiclass" or "binary"
 max_layer = 26  # have only trained binary probes up to this layer for now
 
 
-train_toks = "concat"
+train_toks = "angular"
 min_occurrences = 20
 deps = DependencyTask.dependency_table()
 dep_counts = DependencyTask.count_dependencies(train_data)
@@ -150,40 +150,40 @@ import probing_merged
 importlib.reload(probing_merged)
 from probing_merged import train_probe
 
-# Load already trained probes
-if os.path.exists(model_path):
-    with open(model_path, "rb") as f:
-        probes = pickle.load(f)
-else:
-    print(f"Probes not found at {model_path}, training new probes")
+# # Load already trained probes
+# with open(model_path, "rb") as f:
+#     probes = pickle.load(f)
 
-    # Train probes for different layers
-    # Note this is inefficient in that it re-runs the model (one forward pass per layer), though it stops at layer+1 each time
-    probes = {}
-    for layer in range(0, ud_model.model.cfg.n_layers):
+# Train probes for different layers
+# Note this is inefficient in that it re-runs the model (one forward pass per layer), though it stops at layer+1 each time
+probes = {}
+for layer in range(0, ud_model.model.cfg.n_layers):
 
-        probe = train_probe(
-            model=ud_model,
-            train_loader=train_loader,
-            dev_loader=dev_loader,
-            device=device_model,
-            layer=layer,
-            num_epochs=30,
-            train_toks=train_toks,
-            run_group=start_time,
-            frequent_deps=list(frequent_deps.keys()),
-            probe_type=probe_type
-        )
+    probe = train_probe(
+        model=ud_model,
+        train_loader=train_loader,
+        dev_loader=dev_loader,
+        device=device_model,
+        layer=layer,
+        num_epochs=15,
+        train_toks=train_toks,
+        run_group=start_time,
+        frequent_deps=list(frequent_deps.keys()),
+        probe_type=probe_type
+    )
 
-        probes[layer] = probe
-        del probe
-        empty_cache()
+    probes[layer] = probe
+    del probe
+    empty_cache()
 
-        # comment the next line out if you want to overwrite existing probes
-        # if not os.path.exists(model_path):
-        with open(model_path, "wb") as f:
-            print(f"Saving probes to {model_path}")
-            pickle.dump(probes, f)
+    # comment the next line out if you want to overwrite existing probes
+    # if not os.path.exists(model_path):
+    with open(model_path, "wb") as f:
+        print(f"Saving probes to {model_path}")
+        pickle.dump(probes, f)
+
+    if layer > 4:
+        break
 
 
 # %%
@@ -199,27 +199,27 @@ import evaluate_merged
 importlib.reload(evaluate_merged)
 from evaluate_merged import main as evaluate_merged_main
 
-# probe_results = evaluate_merged_main(
-#     test_loader,
-#     probes,
-#     ud_model,
-#     train_toks=train_toks,
-#     device=device_model,
-#     frequent_deps=list(frequent_deps.keys()),
-#     probe_type=probe_type,
-#     model_name=model_name
-# )
-
-# get results
-results_path = f"data/evals/{probe_type}_eval_{train_toks}_results_layers_{min(probes.keys())}-{max(probes.keys())}_ndeps_{len(frequent_deps)}.pkl"
-results_path = f"data/evals/{model_name}_eval_results_layers_{min(probes.keys())}-{max(probes.keys())}.pkl"
-probe_results = pickle.load(open(results_path, "rb"))
-
-probe_stats = plot_layer_results(
-    probe_results,
-    list(frequent_deps.keys()),
-    save_path=f"figures/evals/{probe_type}_eval_{train_toks}_results_layers_{min(probes.keys())}-{max(probes.keys())}_ndeps_{len(frequent_deps)}.svg",
+probe_results = evaluate_merged_main(
+    test_loader,
+    probes,
+    ud_model,
+    train_toks=train_toks,
+    device=device_model,
+    frequent_deps=list(frequent_deps.keys()),
+    probe_type=probe_type,
+    model_name=model_name
 )
+
+# # get results
+# results_path = f"data/evals/{probe_type}_eval_{train_toks}_results_layers_{min(probes.keys())}-{max(probes.keys())}_ndeps_{len(frequent_deps)}.pkl"
+# results_path = f"data/evals/{model_name}_eval_results_layers_{min(probes.keys())}-{max(probes.keys())}.pkl"
+# probe_results = pickle.load(open(results_path, "rb"))
+
+# probe_stats = plot_layer_results(
+#     probe_results,
+#     list(frequent_deps.keys()),
+#     save_path=f"figures/evals/{probe_type}_eval_{train_toks}_results_layers_{min(probes.keys())}-{max(probes.keys())}_ndeps_{len(frequent_deps)}.svg",
+# )
 
 # %%
 # plot the correlation matrix for probes themselves
