@@ -280,6 +280,8 @@ def plot_layer_results(
 
         stats[stat] = stat_matrix
 
+    axs.flat[-1].remove()
+
     plt.tight_layout()
     if save_path:
         plt.savefig(save_path, bbox_inches='tight', dpi=300)

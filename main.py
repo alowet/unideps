@@ -198,28 +198,28 @@ test_loader = DataLoader(
 import evaluate_merged
 importlib.reload(evaluate_merged)
 from evaluate_merged import main as evaluate_merged_main
-
-# probe_results = evaluate_merged_main(
-#     test_loader,
-#     probes,
-#     ud_model,
-#     train_toks=train_toks,
-#     device=device_model,
-#     frequent_deps=list(frequent_deps.keys()),
-#     probe_type=probe_type,
-#     model_name=model_name
-# )
+from evaluate_merged import plot_layer_results
+probe_results = evaluate_merged_main(
+    test_loader,
+    probes,
+    ud_model,
+    train_toks=train_toks,
+    device=device_model,
+    frequent_deps=list(frequent_deps.keys()),
+    probe_type=probe_type,
+    model_name=model_name
+)
 
 # get results
-results_path = f"data/evals/{probe_type}_eval_{train_toks}_results_layers_{min(probes.keys())}-{max(probes.keys())}_ndeps_{len(frequent_deps)}.pkl"
-results_path = f"data/evals/{model_name}_eval_results_layers_{min(probes.keys())}-{max(probes.keys())}.pkl"
-probe_results = pickle.load(open(results_path, "rb"))
+# results_path = f"data/evals/{probe_type}_eval_{train_toks}_results_layers_{min(probes.keys())}-{max(probes.keys())}_ndeps_{len(frequent_deps)}.pkl"
+# probe_results = pickle.load(open(results_path, "rb"))
 
-probe_stats = plot_layer_results(
-    probe_results,
-    list(frequent_deps.keys()),
-    save_path=f"figures/evals/{probe_type}_eval_{train_toks}_results_layers_{min(probes.keys())}-{max(probes.keys())}_ndeps_{len(frequent_deps)}.svg",
-)
+# save_path = f"figures/evals/{probe_type}_eval_{train_toks}_results_layers_{min(probes.keys())}-{max(probes.keys())}_ndeps_{len(frequent_deps)}.png"
+# probe_stats = plot_layer_results(
+#     probe_results,
+#     list(frequent_deps.keys()),
+#     save_path=save_path
+# )
 
 # %%
 # plot the correlation matrix for probes themselves
@@ -460,7 +460,7 @@ for ax, stat in zip(axs.flat, ["f1", "precision", "recall"]):
     sns.heatmap(f1_diff, cmap="RdBu_r", norm=norm, xticklabels=list(frequent_deps.keys()), yticklabels=np.arange(sae_comp["matryoshka_16"]["n_layers"]), ax=ax)
     # ax.set_yticks(np.arange(.5, sae_comp["matryoshka_16"]["n_layers"]), np.arange(sae_comp["matryoshka_16"]["start_layer"], sae_comp["matryoshka_16"]["start_layer"] + sae_comp["matryoshka_16"]["n_layers"]), rotation=0)
     ax.set_title(f"{stat.capitalize()} Score for Matryoshka $-$ Gemma Scope SAE")
-plt.savefig(f"figures/sae/f1_diff_matryoshka_gemma_scope_{model_name}.svg", bbox_inches="tight")
+plt.savefig(f"figures/sae/f1_diff_matryoshka_gemma_scope_{model_name}.png", bbox_inches="tight")
 plt.show()
 
 # %%
@@ -486,7 +486,7 @@ eval_df = eval_df[eval_df["dependency"].isin(top_deps.keys())].sort_values(by="f
 fig = plt.figure(figsize=(10, 4))
 ax = sns.barplot(data=eval_df, x="dependency", y="f1", hue="sae")
 ax.set_xticklabels(ax.get_xticklabels(), rotation=90)
-plt.savefig(f"figures/sae/f1_bar_chart_layer_{plot_layer}_{model_name}.svg", bbox_inches="tight")
+plt.savefig(f"figures/sae/f1_bar_chart_layer_{plot_layer}_{model_name}.png", bbox_inches="tight")
 plt.show()
 
 
@@ -494,8 +494,15 @@ plt.show()
 # Compare F1 scores for linear probes vs. SAEs
 # with open(f"data/evals/{probe_type}_eval_{train_toks}_results_layers_{min(probes.keys())}-{max(probes.keys())}_ndeps_{len(frequent_deps)}.pkl", "rb") as f:
 #     eval_results = pickle.load(f)
-probe_f1_matrix = np.array([probe_results[layer]["f1"] for layer in probe_results.keys()])
+mats, tail_results, concat_results, diff_results = {}, {}, {}, {}
 
+for d, name in zip([tail_results, concat_results], ["tail", "concat"]):
+    d = pickle.load(open(f"data/evals/{probe_type}_{name}_min_{min_occurrences}_eval_results_layers_{min(probes.keys())}-{max(probes.keys())}.pkl", "rb"))
+
+    mats[name] = np.array([d[layer]["f1"] for layer in d.keys()])
+
+
+# %%
 cmap = plt.cm.RdBu_r
 norm = plt.Normalize(vmin=-1, vmax=1)
 
@@ -505,18 +512,24 @@ for which_class_name in ["acts"]:  # "class",
     for i_ax, (sae_name, sae_vals) in enumerate(sae_comp.items()):
 
         which_sae = '_'.join(sae_name.split('_')[:-1])
-        f1_diff = probe_f1_matrix[:max_layer - sae_vals["start_layer"]] - sae_vals["stats"][which_class_name]["f1"]
+        f1_diff = mats["tail"][:max_layer - sae_vals["start_layer"]] - sae_vals["stats"][which_class_name]["f1"]
 
         sns.heatmap(f1_diff, cmap="RdBu_r", norm=norm, xticklabels=list(frequent_deps.keys()), yticklabels=np.arange(sae_vals["start_layer"], sae_vals["start_layer"] + sae_vals["n_layers"]), ax=axs[i_ax])
         axs[i_ax].set_title(f"{probe_type.capitalize()} Probe $-$ {sae_name.capitalize()} SAE {which_class_name} F1")
 
-    plt.savefig(f"figures/sae/f1_diff_probe_sae_{which_sae}_{which_class_name}.svg", bbox_inches="tight")
+    plt.savefig(f"figures/sae/f1_diff_probe_sae_{which_class_name}.png", bbox_inches="tight")
     plt.show()
 
     # f1_diff = sae_vals["stats"]["class"]["f1"] - sae_vals["stats"]["acts"]["f1"]
     # sns.heatmap(f1_diff, cmap="RdBu_r", norm=norm, xticklabels=list(frequent_deps.keys()), yticklabels=np.arange(sae_vals["start_layer"], sae_vals["start_layer"] + sae_vals["n_layers"]))
     # plt.title(f"{sae_name} SAE F1 score difference class $-$ acts (naive 0 threshold)")
     # plt.show()
+
+# %%
+sns.heatmap(mats["concat"] - mats["tail"], cmap="RdBu_r", norm=norm, xticklabels=list(frequent_deps.keys()), yticklabels=np.arange(max_layer))
+plt.title(f"Linear Probes: Concat F1 $-$ Tail F1")
+plt.savefig(f"figures/sae/f1_diff_concat_probe.png", bbox_inches="tight")
+plt.show()
 
 
 # %%
